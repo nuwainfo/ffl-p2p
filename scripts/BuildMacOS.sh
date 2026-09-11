@@ -26,6 +26,11 @@ if [[ -z "$GNUTLS_ROOT" ]] && command -v brew >/dev/null 2>&1; then
     GNUTLS_ROOT="$(brew --prefix gnutls 2>/dev/null || true)"
 fi
 
+GETTEXT_ROOT="${FFL_P2P_GETTEXT_ROOT:-}"
+if [[ -z "$GETTEXT_ROOT" ]] && command -v brew >/dev/null 2>&1; then
+    GETTEXT_ROOT="$(brew --prefix gettext 2>/dev/null || true)"
+fi
+
 for pkgConfigDirectory in "$GNUTLS_ROOT/lib/pkgconfig" "$GNUTLS_ROOT/share/pkgconfig"; do
     if [[ -f "$pkgConfigDirectory/gnutls.pc" ]]; then
         export PKG_CONFIG_PATH="$pkgConfigDirectory${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
@@ -48,11 +53,26 @@ EOF
     exit 1
 fi
 
+if [[ ! -d "$GETTEXT_ROOT/lib" ]]; then
+    cat >&2 <<'EOF'
+ffl-p2p requires gettext because static GnuTLS links libintl on macOS.
+
+Install it with:
+
+  brew install gettext
+
+Set FFL_P2P_GETTEXT_ROOT=/path/to/prefix when gettext is installed outside
+Homebrew's default prefix.
+EOF
+    exit 1
+fi
+
 if [[ $CLEAN -eq 1 ]]; then
     rm -rf "$OUT"
 fi
 
 cmake_args=(-DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="$ARCH")
+cmake_args+=(-DFFL_P2P_GETTEXT_ROOT="$GETTEXT_ROOT")
 if [[ $FAKE_PLUM -eq 1 ]]; then
     cmake_args+=(-DFFL_P2P_FAKE_PLUM=ON)
 fi

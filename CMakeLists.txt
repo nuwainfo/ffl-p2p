@@ -22,6 +22,7 @@ option(FFL_P2P_MANYLINUX "Statically link the GNU C++ runtime for a manylinux wh
 set(FFL_P2P_LIBJUICE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/libjuice" CACHE PATH "Patched libjuice source")
 set(FFL_P2P_LIBPLUM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/libplum" CACHE PATH "libplum source")
 set(FFL_P2P_NGTCP2_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/ngtcp2" CACHE PATH "ngtcp2 1.25.x source")
+set(FFL_P2P_GETTEXT_ROOT "" CACHE PATH "gettext prefix used by static GnuTLS on macOS")
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(Threads REQUIRED)
@@ -151,6 +152,22 @@ if(FFL_P2P_ENABLE_QUIC)
         ${GNUTLS_STATIC_LIBRARIES}
     )
     list(APPEND FFL_P2P_QUIC_LINK_DIRECTORIES ${GNUTLS_STATIC_LIBRARY_DIRS})
+
+    if(APPLE)
+        find_library(FFL_P2P_GETTEXT_LIBRARY NAMES intl
+            HINTS "${FFL_P2P_GETTEXT_ROOT}/lib"
+                  /opt/homebrew/opt/gettext/lib
+                  /usr/local/opt/gettext/lib)
+        if(NOT FFL_P2P_GETTEXT_LIBRARY)
+            message(FATAL_ERROR
+                "Static GnuTLS requires libintl. Install Homebrew gettext or set "
+                "FFL_P2P_GETTEXT_ROOT to its prefix.")
+        endif()
+
+        get_filename_component(
+            FFL_P2P_GETTEXT_LIBRARY_DIRECTORY "${FFL_P2P_GETTEXT_LIBRARY}" DIRECTORY)
+        list(APPEND FFL_P2P_QUIC_LINK_DIRECTORIES "${FFL_P2P_GETTEXT_LIBRARY_DIRECTORY}")
+    endif()
 
     # Normalize paired linker arguments before passing them to
     # target_link_options(). Conda can express an rpath as "-R <directory>",
