@@ -9,6 +9,7 @@ BUILD="$OUT/build"
 RAW_WHEEL="$OUT/raw-wheel"
 WHEEL_DIR="$OUT/wheel"
 WHEEL_EXTRACT="$OUT/wheel-extract"
+TOOLS_VENV="$OUT/build-tools"
 FAKE_PLUM=0
 
 for argument in "$@"; do
@@ -54,8 +55,15 @@ fi
 # never package an extension left by a different Python ABI or CMake cache.
 rm -rf "$OUT" "$ROOT/build" "$ROOT/src/ffl_p2p.egg-info"
 
+BUILD_PYTHON="$PYTHON"
 if ! "$PYTHON" -c 'import build, delocate' >/dev/null 2>&1; then
-    "$PYTHON" -m pip install --disable-pip-version-check build delocate
+    "$PYTHON" -m venv "$TOOLS_VENV" || {
+        echo "Unable to create a build-tools virtual environment with $PYTHON." >&2
+        exit 1
+    }
+
+    BUILD_PYTHON="$TOOLS_VENV/bin/python"
+    "$BUILD_PYTHON" -m pip install --disable-pip-version-check build delocate
 fi
 
 cmake_args=(-DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="$ARCH")
@@ -88,7 +96,7 @@ if grep -Eiq '(libjuice|libplum)\.(dylib|so)' <<<"$dependencies"; then
 fi
 
 mkdir -p "$RAW_WHEEL" "$WHEEL_DIR"
-"$PYTHON" -m build --wheel --no-isolation --outdir "$RAW_WHEEL" "$ROOT"
+"$BUILD_PYTHON" -m build --wheel --no-isolation --outdir "$RAW_WHEEL" "$ROOT"
 
 rawWheels=("$RAW_WHEEL"/*.whl)
 [[ -f "${rawWheels[0]}" && ${#rawWheels[@]} -eq 1 ]] || {
@@ -100,7 +108,7 @@ rawWheels=("$RAW_WHEEL"/*.whl)
     exit 1
 }
 
-"$PYTHON" -m delocate.cmd.delocate_wheel -w "$WHEEL_DIR" "${rawWheels[0]}"
+"$BUILD_PYTHON" -m delocate.cmd.delocate_wheel -w "$WHEEL_DIR" "${rawWheels[0]}"
 
 wheels=("$WHEEL_DIR"/*.whl)
 [[ -f "${wheels[0]}" && ${#wheels[@]} -eq 1 ]] || {

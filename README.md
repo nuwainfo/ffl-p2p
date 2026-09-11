@@ -44,6 +44,8 @@ brew install cmake git pkg-config gnutls python
 
 `BuildMacOS.sh` discovers Homebrew's GnuTLS prefix automatically. If GnuTLS is
 installed elsewhere, set `FFL_P2P_GNUTLS_ROOT` to that prefix before building.
+When needed, the script creates an isolated temporary venv for its `build` and
+`delocate` tooling; it does not modify the Homebrew Python environment.
 
 Install Xcode Command Line Tools if needed:
 
