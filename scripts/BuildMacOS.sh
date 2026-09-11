@@ -25,17 +25,19 @@ if [[ $CLEAN -eq 1 ]]; then
     rm -rf "$OUT"
 fi
 
-bootstrap_args=()
 cmake_args=(-DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="$ARCH")
 if [[ $FAKE_PLUM -eq 1 ]]; then
-    bootstrap_args+=(--fake-plum)
     cmake_args+=(-DFFL_P2P_FAKE_PLUM=ON)
 fi
 if [[ -n "${MACOSX_DEPLOYMENT_TARGET:-}" ]]; then
     cmake_args+=(-DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET")
 fi
 
-"$PYTHON" "$ROOT/scripts/Bootstrap.py" "${bootstrap_args[@]}"
+if [[ $FAKE_PLUM -eq 1 ]]; then
+    "$PYTHON" "$ROOT/scripts/Bootstrap.py" --fake-plum
+else
+    "$PYTHON" "$ROOT/scripts/Bootstrap.py"
+fi
 cmake -S "$ROOT" -B "$BUILD" "${cmake_args[@]}"
 cmake --build "$BUILD" --target _ffl_p2p --parallel
 

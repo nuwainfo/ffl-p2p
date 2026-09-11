@@ -104,23 +104,25 @@ fi
 
 # Native extensions and wheels must always be rebuilt together. In particular,
 # never package an extension left by a different Python ABI or CMake cache.
-rm -rf "$OUT"
+rm -rf "$OUT" "$ROOT/build" "$ROOT/src/ffl_p2p.egg-info"
 
 if ! "$PYTHON" -c 'import build' >/dev/null 2>&1; then
     "$PYTHON" -m pip install --disable-pip-version-check build
 fi
 
-bootstrap_args=()
 cmake_args=(-DCMAKE_BUILD_TYPE=Release)
 if [[ -n "$MANYLINUX" ]]; then
     cmake_args+=(-DFFL_P2P_MANYLINUX=ON)
 fi
 if [[ $FAKE_PLUM -eq 1 ]]; then
-    bootstrap_args+=(--fake-plum)
     cmake_args+=(-DFFL_P2P_FAKE_PLUM=ON)
 fi
 
-"$PYTHON" "$ROOT/scripts/Bootstrap.py" "${bootstrap_args[@]}"
+if [[ $FAKE_PLUM -eq 1 ]]; then
+    "$PYTHON" "$ROOT/scripts/Bootstrap.py" --fake-plum
+else
+    "$PYTHON" "$ROOT/scripts/Bootstrap.py"
+fi
 cmake -S "$ROOT" -B "$BUILD" "${cmake_args[@]}"
 cmake --build "$BUILD" --target _ffl_p2p --parallel
 
