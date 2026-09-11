@@ -150,7 +150,31 @@ if(FFL_P2P_ENABLE_QUIC)
         ${GNUTLS_STATIC_LIBRARIES}
     )
     list(APPEND FFL_P2P_QUIC_LINK_DIRECTORIES ${GNUTLS_STATIC_LIBRARY_DIRS})
-    list(APPEND FFL_P2P_QUIC_LINK_OPTIONS ${GNUTLS_STATIC_LDFLAGS_OTHER})
+
+    # Conda's gnutls.pc can express an rpath as "-R <directory>". CMake passes
+    # target_link_options() directly to the compiler driver, where GCC rejects
+    # -R. Convert only that pkg-config spelling to the portable driver form.
+    set(FFL_P2P_GNUTLS_LINK_OPTIONS "")
+    set(FFL_P2P_GNUTLS_RPATH_PENDING OFF)
+    foreach(FFL_P2P_GNUTLS_LINK_OPTION IN LISTS GNUTLS_STATIC_LDFLAGS_OTHER)
+        if(FFL_P2P_GNUTLS_RPATH_PENDING)
+            list(APPEND FFL_P2P_GNUTLS_LINK_OPTIONS
+                "-Wl,-rpath,${FFL_P2P_GNUTLS_LINK_OPTION}"
+            )
+            set(FFL_P2P_GNUTLS_RPATH_PENDING OFF)
+        elseif(FFL_P2P_GNUTLS_LINK_OPTION STREQUAL "-R")
+            set(FFL_P2P_GNUTLS_RPATH_PENDING ON)
+        elseif(FFL_P2P_GNUTLS_LINK_OPTION MATCHES "^-R(.+)")
+            list(APPEND FFL_P2P_GNUTLS_LINK_OPTIONS "-Wl,-rpath,${CMAKE_MATCH_1}")
+        else()
+            list(APPEND FFL_P2P_GNUTLS_LINK_OPTIONS "${FFL_P2P_GNUTLS_LINK_OPTION}")
+        endif()
+    endforeach()
+    if(FFL_P2P_GNUTLS_RPATH_PENDING)
+        message(FATAL_ERROR "GnuTLS pkg-config output ends with an incomplete -R flag")
+    endif()
+
+    list(APPEND FFL_P2P_QUIC_LINK_OPTIONS ${FFL_P2P_GNUTLS_LINK_OPTIONS})
     list(APPEND FFL_P2P_QUIC_COMPILE_OPTIONS ${GNUTLS_STATIC_CFLAGS_OTHER})
 endif()
 
