@@ -22,7 +22,6 @@ option(FFL_P2P_MANYLINUX "Statically link the GNU C++ runtime for a manylinux wh
 set(FFL_P2P_LIBJUICE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/libjuice" CACHE PATH "Patched libjuice source")
 set(FFL_P2P_LIBPLUM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/libplum" CACHE PATH "libplum source")
 set(FFL_P2P_NGTCP2_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/ngtcp2" CACHE PATH "ngtcp2 1.25.x source")
-set(FFL_P2P_GETTEXT_ROOT "" CACHE PATH "gettext prefix used by static GnuTLS on macOS")
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
 find_package(Threads REQUIRED)
@@ -146,27 +145,22 @@ if(FFL_P2P_ENABLE_QUIC)
         native/quic/Credentials.cpp
         native/quic/Connection.cpp
     )
-    list(APPEND FFL_P2P_QUIC_LIBRARIES
-        ngtcp2_static
-        ngtcp2_crypto_gnutls_static
-        ${GNUTLS_STATIC_LIBRARIES}
-    )
-    list(APPEND FFL_P2P_QUIC_LINK_DIRECTORIES ${GNUTLS_STATIC_LIBRARY_DIRS})
-
-    if(APPLE)
-        find_library(FFL_P2P_GETTEXT_LIBRARY NAMES intl
-            HINTS "${FFL_P2P_GETTEXT_ROOT}/lib"
-                  /opt/homebrew/opt/gettext/lib
-                  /usr/local/opt/gettext/lib)
-        if(NOT FFL_P2P_GETTEXT_LIBRARY)
-            message(FATAL_ERROR
-                "Static GnuTLS requires libintl. Install Homebrew gettext or set "
-                "FFL_P2P_GETTEXT_ROOT to its prefix.")
-        endif()
-
-        get_filename_component(
-            FFL_P2P_GETTEXT_LIBRARY_DIRECTORY "${FFL_P2P_GETTEXT_LIBRARY}" DIRECTORY)
-        list(APPEND FFL_P2P_QUIC_LINK_DIRECTORIES "${FFL_P2P_GETTEXT_LIBRARY_DIRECTORY}")
+    list(APPEND FFL_P2P_QUIC_LIBRARIES ngtcp2_static ngtcp2_crypto_gnutls_static)
+    if(WIN32)
+        # vcpkg supplies static GnuTLS on Windows. Link its full pkg-config
+        # closure because MSVC does not load static-library dependencies.
+        list(APPEND FFL_P2P_QUIC_LIBRARIES ${GNUTLS_STATIC_LIBRARIES})
+        list(APPEND FFL_P2P_QUIC_LINK_DIRECTORIES ${GNUTLS_STATIC_LIBRARY_DIRS})
+        set(FFL_P2P_GNUTLS_RAW_LINK_OPTIONS ${GNUTLS_STATIC_LDFLAGS_OTHER})
+        set(FFL_P2P_GNUTLS_COMPILE_OPTIONS ${GNUTLS_STATIC_CFLAGS_OTHER})
+    else()
+        # Homebrew and normal Unix distributions provide dynamic GnuTLS. Its
+        # shared library owns the transitive crypto and internationalization
+        # dependencies, so do not force their static pkg-config closure here.
+        list(APPEND FFL_P2P_QUIC_LIBRARIES ${GNUTLS_LIBRARIES})
+        list(APPEND FFL_P2P_QUIC_LINK_DIRECTORIES ${GNUTLS_LIBRARY_DIRS})
+        set(FFL_P2P_GNUTLS_RAW_LINK_OPTIONS ${GNUTLS_LDFLAGS_OTHER})
+        set(FFL_P2P_GNUTLS_COMPILE_OPTIONS ${GNUTLS_CFLAGS_OTHER})
     endif()
 
     # Normalize paired linker arguments before passing them to
@@ -176,7 +170,7 @@ if(FFL_P2P_ENABLE_QUIC)
     set(FFL_P2P_GNUTLS_LINK_OPTIONS "")
     set(FFL_P2P_GNUTLS_RPATH_PENDING OFF)
     set(FFL_P2P_GNUTLS_FRAMEWORK_PENDING OFF)
-    foreach(FFL_P2P_GNUTLS_LINK_OPTION IN LISTS GNUTLS_STATIC_LDFLAGS_OTHER)
+    foreach(FFL_P2P_GNUTLS_LINK_OPTION IN LISTS FFL_P2P_GNUTLS_RAW_LINK_OPTIONS)
         if(FFL_P2P_GNUTLS_RPATH_PENDING)
             list(APPEND FFL_P2P_GNUTLS_LINK_OPTIONS
                 "-Wl,-rpath,${FFL_P2P_GNUTLS_LINK_OPTION}"
@@ -205,7 +199,7 @@ if(FFL_P2P_ENABLE_QUIC)
     endif()
 
     list(APPEND FFL_P2P_QUIC_LINK_OPTIONS ${FFL_P2P_GNUTLS_LINK_OPTIONS})
-    list(APPEND FFL_P2P_QUIC_COMPILE_OPTIONS ${GNUTLS_STATIC_CFLAGS_OTHER})
+    list(APPEND FFL_P2P_QUIC_COMPILE_OPTIONS ${FFL_P2P_GNUTLS_COMPILE_OPTIONS})
 endif()
 
 if(FFL_P2P_ENABLE_DIAGNOSTICS)

@@ -6,13 +6,15 @@ PYTHON="${PYTHON:-python3}"
 ARCH="${ARCH:-$(uname -m)}"
 OUT="$ROOT/out/native-macos"
 BUILD="$OUT/build"
+RAW_WHEEL="$OUT/raw-wheel"
+WHEEL_DIR="$OUT/wheel"
+WHEEL_EXTRACT="$OUT/wheel-extract"
 FAKE_PLUM=0
-CLEAN=0
 
 for argument in "$@"; do
     case "$argument" in
         --fake-plum) FAKE_PLUM=1 ;;
-        --clean) CLEAN=1 ;;
+        --clean) : ;; # Kept for compatibility; every macOS build is clean.
         *) echo "Unknown argument: $argument" >&2; exit 2 ;;
     esac
 done
@@ -24,11 +26,6 @@ done
 GNUTLS_ROOT="${FFL_P2P_GNUTLS_ROOT:-}"
 if [[ -z "$GNUTLS_ROOT" ]] && command -v brew >/dev/null 2>&1; then
     GNUTLS_ROOT="$(brew --prefix gnutls 2>/dev/null || true)"
-fi
-
-GETTEXT_ROOT="${FFL_P2P_GETTEXT_ROOT:-}"
-if [[ -z "$GETTEXT_ROOT" ]] && command -v brew >/dev/null 2>&1; then
-    GETTEXT_ROOT="$(brew --prefix gettext 2>/dev/null || true)"
 fi
 
 for pkgConfigDirectory in "$GNUTLS_ROOT/lib/pkgconfig" "$GNUTLS_ROOT/share/pkgconfig"; do
@@ -53,26 +50,15 @@ EOF
     exit 1
 fi
 
-if [[ ! -d "$GETTEXT_ROOT/lib" ]]; then
-    cat >&2 <<'EOF'
-ffl-p2p requires gettext because static GnuTLS links libintl on macOS.
+# Native extensions and wheels must always be rebuilt together. In particular,
+# never package an extension left by a different Python ABI or CMake cache.
+rm -rf "$OUT" "$ROOT/build" "$ROOT/src/ffl_p2p.egg-info"
 
-Install it with:
-
-  brew install gettext
-
-Set FFL_P2P_GETTEXT_ROOT=/path/to/prefix when gettext is installed outside
-Homebrew's default prefix.
-EOF
-    exit 1
-fi
-
-if [[ $CLEAN -eq 1 ]]; then
-    rm -rf "$OUT"
+if ! "$PYTHON" -c 'import build, delocate' >/dev/null 2>&1; then
+    "$PYTHON" -m pip install --disable-pip-version-check build delocate
 fi
 
 cmake_args=(-DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="$ARCH")
-cmake_args+=(-DFFL_P2P_GETTEXT_ROOT="$GETTEXT_ROOT")
 if [[ $FAKE_PLUM -eq 1 ]]; then
     cmake_args+=(-DFFL_P2P_FAKE_PLUM=ON)
 fi
@@ -90,6 +76,8 @@ cmake --build "$BUILD" --target _ffl_p2p --parallel
 
 extension="$(find "$BUILD" -type f -name '_ffl_p2p*.so' -print -quit)"
 [[ -n "$extension" ]] || { echo "Built _ffl_p2p extension was not found" >&2; exit 1; }
+
+find "$ROOT/src/ffl_p2p" -maxdepth 1 -type f -name '_ffl_p2p*.so' -delete
 cp "$extension" "$ROOT/src/ffl_p2p/$(basename "$extension")"
 
 dependencies="$(otool -L "$extension")"
@@ -99,4 +87,55 @@ if grep -Eiq '(libjuice|libplum)\.(dylib|so)' <<<"$dependencies"; then
     exit 1
 fi
 
-echo "[PASS] Native macOS build completed: $ROOT/src/ffl_p2p/$(basename "$extension")"
+mkdir -p "$RAW_WHEEL" "$WHEEL_DIR"
+"$PYTHON" -m build --wheel --no-isolation --outdir "$RAW_WHEEL" "$ROOT"
+
+rawWheels=("$RAW_WHEEL"/*.whl)
+[[ -f "${rawWheels[0]}" && ${#rawWheels[@]} -eq 1 ]] || {
+    echo "Expected one raw wheel." >&2
+    exit 1
+}
+[[ "${rawWheels[0]}" != *-none-any.whl ]] || {
+    echo "The raw wheel is incorrectly tagged as pure Python. Ensure setup.py is present." >&2
+    exit 1
+}
+
+"$PYTHON" -m delocate.cmd.delocate_wheel -w "$WHEEL_DIR" "${rawWheels[0]}"
+
+wheels=("$WHEEL_DIR"/*.whl)
+[[ -f "${wheels[0]}" && ${#wheels[@]} -eq 1 ]] || {
+    echo "Expected one repaired wheel." >&2
+    exit 1
+}
+
+"$PYTHON" - "$WHEEL_EXTRACT" "${wheels[0]}" <<'PY'
+import shutil
+import sys
+import zipfile
+from pathlib import Path
+
+destination, wheel = map(Path, sys.argv[1:])
+shutil.rmtree(destination, ignore_errors=True)
+with zipfile.ZipFile(wheel) as archive:
+    archive.extractall(destination)
+
+extensions = list(destination.glob('ffl_p2p/_ffl_p2p*.so'))
+if len(extensions) != 1:
+    raise SystemExit(f'Expected one native extension in the final wheel, found {len(extensions)}')
+
+libraries = list(destination.glob('ffl_p2p/.dylibs/libgnutls*.dylib'))
+if len(libraries) != 1:
+    raise SystemExit(f'Expected one bundled GnuTLS library, found {len(libraries)}')
+
+print(extensions[0])
+PY
+
+wheelExtension="$(find "$WHEEL_EXTRACT/ffl_p2p" -maxdepth 1 -type f -name '_ffl_p2p*.so' -print -quit)"
+wheelDependencies="$(otool -L "$wheelExtension")"
+printf '%s\n' "$wheelDependencies"
+if grep -Eq '/(opt/homebrew|usr/local)/(Cellar|opt)/' <<<"$wheelDependencies"; then
+    echo "The repaired wheel still references a Homebrew library path." >&2
+    exit 1
+fi
+
+echo "[PASS] Native macOS wheel build completed: ${wheels[0]}"

@@ -39,7 +39,7 @@ Run the command without `sudo` when building as `root` in a container.
 ### macOS
 
 ```bash
-brew install cmake git pkg-config gettext gnutls python
+brew install cmake git pkg-config gnutls python
 ```
 
 `BuildMacOS.sh` discovers Homebrew's GnuTLS prefix automatically. If GnuTLS is
@@ -92,10 +92,11 @@ python scripts/Test.py
 python scripts/Test.py
 ```
 
-The built `_ffl_p2p` extension is copied into `src/ffl_p2p/`. Each build also
-checks that libjuice and libplum are statically linked. For deterministic tests
-without a production libplum, pass `-FakePlum` on Windows or `--fake-plum` on
-Linux/macOS.
+The Linux and macOS scripts produce wheels under `out/native-*/wheel/`. The
+macOS wheel bundles its GnuTLS libraries, so users installing that wheel do not
+need Homebrew or a separate GnuTLS installation. Each build checks that
+libjuice and libplum are statically linked. For deterministic tests without a
+production libplum, pass `-FakePlum` on Windows or `--fake-plum` on Linux/macOS.
 
 ## Integrating with FastFileLink
 
