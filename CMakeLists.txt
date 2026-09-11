@@ -152,27 +152,39 @@ if(FFL_P2P_ENABLE_QUIC)
     )
     list(APPEND FFL_P2P_QUIC_LINK_DIRECTORIES ${GNUTLS_STATIC_LIBRARY_DIRS})
 
-    # Conda's gnutls.pc can express an rpath as "-R <directory>". CMake passes
-    # target_link_options() directly to the compiler driver, where GCC rejects
-    # -R. Convert only that pkg-config spelling to the portable driver form.
+    # Normalize paired linker arguments before passing them to
+    # target_link_options(). Conda can express an rpath as "-R <directory>",
+    # while Homebrew's GnuTLS can use "-framework <name>". CMake may de-duplicate
+    # a standalone -framework option, so keep each framework pair atomic.
     set(FFL_P2P_GNUTLS_LINK_OPTIONS "")
     set(FFL_P2P_GNUTLS_RPATH_PENDING OFF)
+    set(FFL_P2P_GNUTLS_FRAMEWORK_PENDING OFF)
     foreach(FFL_P2P_GNUTLS_LINK_OPTION IN LISTS GNUTLS_STATIC_LDFLAGS_OTHER)
         if(FFL_P2P_GNUTLS_RPATH_PENDING)
             list(APPEND FFL_P2P_GNUTLS_LINK_OPTIONS
                 "-Wl,-rpath,${FFL_P2P_GNUTLS_LINK_OPTION}"
             )
             set(FFL_P2P_GNUTLS_RPATH_PENDING OFF)
+        elseif(FFL_P2P_GNUTLS_FRAMEWORK_PENDING)
+            list(APPEND FFL_P2P_GNUTLS_LINK_OPTIONS
+                "SHELL:-framework ${FFL_P2P_GNUTLS_LINK_OPTION}"
+            )
+            set(FFL_P2P_GNUTLS_FRAMEWORK_PENDING OFF)
         elseif(FFL_P2P_GNUTLS_LINK_OPTION STREQUAL "-R")
             set(FFL_P2P_GNUTLS_RPATH_PENDING ON)
         elseif(FFL_P2P_GNUTLS_LINK_OPTION MATCHES "^-R(.+)")
             list(APPEND FFL_P2P_GNUTLS_LINK_OPTIONS "-Wl,-rpath,${CMAKE_MATCH_1}")
+        elseif(FFL_P2P_GNUTLS_LINK_OPTION STREQUAL "-framework")
+            set(FFL_P2P_GNUTLS_FRAMEWORK_PENDING ON)
         else()
             list(APPEND FFL_P2P_GNUTLS_LINK_OPTIONS "${FFL_P2P_GNUTLS_LINK_OPTION}")
         endif()
     endforeach()
     if(FFL_P2P_GNUTLS_RPATH_PENDING)
         message(FATAL_ERROR "GnuTLS pkg-config output ends with an incomplete -R flag")
+    endif()
+    if(FFL_P2P_GNUTLS_FRAMEWORK_PENDING)
+        message(FATAL_ERROR "GnuTLS pkg-config output ends with an incomplete -framework flag")
     endif()
 
     list(APPEND FFL_P2P_QUIC_LINK_OPTIONS ${FFL_P2P_GNUTLS_LINK_OPTIONS})
