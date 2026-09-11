@@ -2,7 +2,13 @@
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON="${PYTHON:-python3}"
+if [[ -n "${PYTHON:-}" ]]; then
+    PYTHON="$PYTHON"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON=python
+else
+    PYTHON=python3
+fi
 ARCH="${ARCH:-$(uname -m)}"
 OUT="$ROOT/out/native-macos"
 BUILD="$OUT/build"
@@ -56,17 +62,22 @@ fi
 rm -rf "$OUT" "$ROOT/build" "$ROOT/src/ffl_p2p.egg-info"
 
 BUILD_PYTHON="$PYTHON"
-if ! "$PYTHON" -c 'import build, delocate' >/dev/null 2>&1; then
+if ! "$PYTHON" -c 'import build, delocate, setuptools' >/dev/null 2>&1; then
     "$PYTHON" -m venv "$TOOLS_VENV" || {
         echo "Unable to create a build-tools virtual environment with $PYTHON." >&2
         exit 1
     }
 
     BUILD_PYTHON="$TOOLS_VENV/bin/python"
-    "$BUILD_PYTHON" -m pip install --disable-pip-version-check build delocate
+    "$BUILD_PYTHON" -m pip install --disable-pip-version-check \
+        'setuptools>=68' build delocate
 fi
 
-cmake_args=(-DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="$ARCH")
+cmake_args=(
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_OSX_ARCHITECTURES="$ARCH"
+    -DPython3_EXECUTABLE="$PYTHON"
+)
 if [[ $FAKE_PLUM -eq 1 ]]; then
     cmake_args+=(-DFFL_P2P_FAKE_PLUM=ON)
 fi
