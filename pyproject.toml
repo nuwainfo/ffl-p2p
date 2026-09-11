@@ -14,3 +14,6 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+ffl_p2p = ["_ffl_p2p*.so", "_ffl_p2p*.pyd", "_ffl_p2p*.dylib"]
