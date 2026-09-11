@@ -1,0 +1,140 @@
+diff --git a/include/juice/juice.h b/include/juice/juice.h
+index ea5e04d..d3a7aab 100644
+--- a/include/juice/juice.h
++++ b/include/juice/juice.h
+@@ -66,6 +66,27 @@ typedef void (*juice_cb_candidate_t)(juice_agent_t *agent, const char *sdp, void
+ typedef void (*juice_cb_gathering_done_t)(juice_agent_t *agent, void *user_ptr);
+ typedef void (*juice_cb_recv_t)(juice_agent_t *agent, const char *data, size_t size,
+                                 void *user_ptr);
++
++#define JUICE_UDP_RECV_BATCH_CAPACITY 64
++#define JUICE_UDP_RECV_ADDRESS_STORAGE_SIZE 128
++
++typedef struct juice_udp_recv_datagram {
++	const char *data;
++	size_t size;
++	uint8_t source_address[JUICE_UDP_RECV_ADDRESS_STORAGE_SIZE];
++	size_t source_address_size;
++} juice_udp_recv_datagram_t;
++
++// Optional socket-ready receive hook. The callback is invoked synchronously from
++// libjuice's UDP poll thread and may return multiple datagrams from one socket
++// receive operation. Pointers in the returned datagrams must remain valid while
++// libjuice synchronously processes the returned batch (that is, until the next
++// invocation of this callback). A negative return indicates a socket
++// error and stores the platform error code in socket_error.
++typedef int (*juice_cb_udp_recv_batch_t)(uintptr_t socket_handle,
++                                         juice_udp_recv_datagram_t *datagrams,
++                                         size_t capacity, int *socket_error,
++                                         void *user_ptr);
+ // Called once for a one-shot STUN probe. `mapped` is NULL on failure/timeout.
+ // The callback follows the same locking rules as other libjuice callbacks.
+ typedef void (*juice_cb_stun_probe_t)(juice_agent_t *agent, const char *server,
+@@ -117,8 +138,10 @@ typedef struct juice_config {
+ 	juice_cb_candidate_t cb_candidate;
+ 	juice_cb_gathering_done_t cb_gathering_done;
+ 	juice_cb_recv_t cb_recv;
++	juice_cb_udp_recv_batch_t cb_udp_recv_batch;
+ 
+ 	void *user_ptr;
++	void *udp_recv_batch_user_ptr;
+ 
+ } juice_config_t;
+ 
+diff --git a/src/agent.c b/src/agent.c
+index 14da4a8..fec94eb 100644
+--- a/src/agent.c
++++ b/src/agent.c
+@@ -107,7 +107,9 @@ juice_agent_t *agent_create(const juice_config_t *config) {
+ 	agent->config.cb_candidate = config->cb_candidate;
+ 	agent->config.cb_gathering_done = config->cb_gathering_done;
+ 	agent->config.cb_recv = config->cb_recv;
++	agent->config.cb_udp_recv_batch = config->cb_udp_recv_batch;
+ 	agent->config.user_ptr = config->user_ptr;
++	agent->config.udp_recv_batch_user_ptr = config->udp_recv_batch_user_ptr;
+ 	if (alloc_failed) {
+ 		JLOG_FATAL("Memory allocation for configuration copy failed");
+ 		goto error;
+diff --git a/src/conn_poll.c b/src/conn_poll.c
+index cb4e1ec..0991520 100644
+--- a/src/conn_poll.c
++++ b/src/conn_poll.c
+@@ -246,17 +246,71 @@ void conn_poll_process_udp(juice_agent_t *agent, struct pollfd *pfd) {
+ 		addr_record_t src;
+ 		int ret = 0;
+ 		int left = 1000; // limit for fairness between sockets
+-		while (left--) {
+-			if ((ret = conn_poll_recv_udp(conn_impl->udp_sock, buffer, BUFFER_SIZE,
+-							&src)) <= 0) {
+-				break;
++
++		while (left > 0) {
++			if (!agent->config.cb_udp_recv_batch) {
++				ret = conn_poll_recv_udp(conn_impl->udp_sock, buffer, BUFFER_SIZE, &src);
++				if (ret <= 0)
++					break;
++
++				if (agent_conn_recv(agent, buffer, (size_t)ret, &src) != 0) {
++					JLOG_WARN("Agent receive failed");
++					conn_impl->state = CONN_STATE_FINISHED;
++					break;
++				}
++				--left;
++				continue;
+ 			}
+ 
+-			if (agent_conn_recv(agent, buffer, (size_t)ret, &src) != 0) {
+-				JLOG_WARN("Agent receive failed");
+-				conn_impl->state = CONN_STATE_FINISHED;
++			juice_udp_recv_datagram_t datagrams[JUICE_UDP_RECV_BATCH_CAPACITY];
++			size_t capacity = (size_t)left;
++			if (capacity > JUICE_UDP_RECV_BATCH_CAPACITY)
++				capacity = JUICE_UDP_RECV_BATCH_CAPACITY;
++
++			int socket_error = 0;
++			int count = agent->config.cb_udp_recv_batch(
++			    (uintptr_t)conn_impl->udp_sock, datagrams, capacity, &socket_error,
++			    agent->config.udp_recv_batch_user_ptr);
++			if (count < 0) {
++				ret = -socket_error;
++				break;
++			}
++			if (count == 0) {
++				ret = -SEAGAIN;
+ 				break;
+ 			}
++			if ((size_t)count > capacity) {
++				JLOG_ERROR("UDP receive batch callback exceeded capacity");
++				ret = -SEMSGSIZE;
++				break;
++			}
++
++			for (int i = 0; i < count; ++i) {
++				juice_udp_recv_datagram_t *datagram = datagrams + i;
++				if (!datagram->data || datagram->size == 0 ||
++				    datagram->source_address_size > sizeof(src.addr)) {
++					JLOG_ERROR("UDP receive batch callback returned invalid datagram");
++					ret = -SEMSGSIZE;
++					conn_impl->state = CONN_STATE_FINISHED;
++					break;
++				}
++
++				memset(&src, 0, sizeof(src));
++				memcpy(&src.addr, datagram->source_address, datagram->source_address_size);
++				src.len = (socklen_t)datagram->source_address_size;
++				src.socktype = SOCK_DGRAM;
++				addr_unmap_inet6_v4mapped((struct sockaddr *)&src.addr, &src.len);
++
++				if (agent_conn_recv(agent, (char *)datagram->data, datagram->size, &src) != 0) {
++					JLOG_WARN("Agent receive failed");
++					conn_impl->state = CONN_STATE_FINISHED;
++					break;
++				}
++			}
++			if (conn_impl->state == CONN_STATE_FINISHED)
++				break;
++			left -= count;
++			ret = count;
+ 		}
+ 
+ 		if (conn_impl->state == CONN_STATE_FINISHED)

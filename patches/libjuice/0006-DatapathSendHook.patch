@@ -1,0 +1,89 @@
+diff --git a/include/juice/juice.h b/include/juice/juice.h
+index bec4dfd..d8923e4 100644
+--- a/include/juice/juice.h
++++ b/include/juice/juice.h
+@@ -87,6 +87,21 @@ typedef int (*juice_cb_udp_recv_batch_t)(uintptr_t socket_handle,
+                                          juice_udp_recv_datagram_t *datagrams,
+                                          size_t capacity, int *socket_error,
+                                          void *user_ptr);
++
++#define JUICE_UDP_SEND_AGGREGATE_NOT_HANDLED 0
++#define JUICE_UDP_SEND_AGGREGATE_HANDLED 1
++#define JUICE_UDP_SEND_AGGREGATE_FAILED -1
++
++// Optional aggregate-send hook for platform datapaths. libjuice still owns ICE
++// path selection, the selected socket and send locking; the callback only owns
++// the platform packet-I/O policy. Return NOT_HANDLED to use libjuice's normal
++// aggregate fallback. A failed handled send stores the platform error code in
++// socket_error and any successfully accepted prefix in sent_size.
++typedef int (*juice_cb_udp_send_aggregate_t)(
++    uintptr_t socket_handle, int socket_family,
++    const uint8_t *destination_address, size_t destination_address_size,
++    const char *data, size_t size, size_t segment_size,
++    size_t *sent_size, int *socket_error, void *user_ptr);
+ // Called once for a one-shot STUN probe. `mapped` is NULL on failure/timeout.
+ // The callback follows the same locking rules as other libjuice callbacks.
+ typedef void (*juice_cb_stun_probe_t)(juice_agent_t *agent, const char *server,
+@@ -139,9 +154,11 @@ typedef struct juice_config {
+ 	juice_cb_gathering_done_t cb_gathering_done;
+ 	juice_cb_recv_t cb_recv;
+ 	juice_cb_udp_recv_batch_t cb_udp_recv_batch;
++	juice_cb_udp_send_aggregate_t cb_udp_send_aggregate;
+ 
+ 	void *user_ptr;
+ 	void *udp_recv_batch_user_ptr;
++	void *udp_send_aggregate_user_ptr;
+ 
+ } juice_config_t;
+ 
+diff --git a/src/agent.c b/src/agent.c
+index fafd27a..215c2ee 100644
+--- a/src/agent.c
++++ b/src/agent.c
+@@ -108,8 +108,10 @@ juice_agent_t *agent_create(const juice_config_t *config) {
+ 	agent->config.cb_gathering_done = config->cb_gathering_done;
+ 	agent->config.cb_recv = config->cb_recv;
+ 	agent->config.cb_udp_recv_batch = config->cb_udp_recv_batch;
++	agent->config.cb_udp_send_aggregate = config->cb_udp_send_aggregate;
+ 	agent->config.user_ptr = config->user_ptr;
+ 	agent->config.udp_recv_batch_user_ptr = config->udp_recv_batch_user_ptr;
++	agent->config.udp_send_aggregate_user_ptr = config->udp_send_aggregate_user_ptr;
+ 	if (alloc_failed) {
+ 		JLOG_FATAL("Memory allocation for configuration copy failed");
+ 		goto error;
+diff --git a/src/conn_poll.c b/src/conn_poll.c
+index 7fbc6f3..606286d 100644
+--- a/src/conn_poll.c
++++ b/src/conn_poll.c
+@@ -733,10 +733,27 @@ int conn_poll_send_aggregate(juice_agent_t *agent, const addr_record_t *dst, con
+ 			conn_impl->send_ds = -1;
+ 	}
+ 
+-	int ret = udp_sendto_aggregate(conn_impl->udp_sock, conn_impl->udp_family, data, size,
+-	                               segment_size, dst, sent_size);
+-	if (ret < 0)
+-		ret = -sockerrno;
++	int socket_error = 0;
++	int hook_result = JUICE_UDP_SEND_AGGREGATE_NOT_HANDLED;
++	if (agent->config.cb_udp_send_aggregate) {
++		hook_result = agent->config.cb_udp_send_aggregate(
++		    (uintptr_t)conn_impl->udp_sock, conn_impl->udp_family,
++		    (const uint8_t *)&dst->addr, (size_t)dst->len,
++		    data, size, segment_size, sent_size, &socket_error,
++		    agent->config.udp_send_aggregate_user_ptr);
++	}
++
++	int ret;
++	if (hook_result == JUICE_UDP_SEND_AGGREGATE_HANDLED) {
++		ret = (int)size;
++	} else if (hook_result == JUICE_UDP_SEND_AGGREGATE_FAILED) {
++		ret = socket_error > 0 ? -socket_error : -1;
++	} else {
++		ret = udp_sendto_aggregate(conn_impl->udp_sock, conn_impl->udp_family, data, size,
++		                           segment_size, dst, sent_size);
++		if (ret < 0)
++			ret = -sockerrno;
++	}
+ 
+ 	if (ret < 0) {
+ 		if (ret == -SEAGAIN || ret == -SEWOULDBLOCK)

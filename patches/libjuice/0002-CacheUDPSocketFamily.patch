@@ -1,0 +1,93 @@
+diff --git a/src/conn_poll.c b/src/conn_poll.c
+index 7d6ed7b..d8e9d65 100644
+--- a/src/conn_poll.c
++++ b/src/conn_poll.c
+@@ -35,6 +35,7 @@ typedef struct conn_impl {
+ 	conn_registry_t *registry;
+ 	conn_state_t state;
+ 	socket_t udp_sock;
++	int udp_family;
+ 	socket_t tcp_sock;
+ 	tcp_ice_write_context_t tcp_ice_write_context;
+ 	tcp_ice_read_context_t tcp_ice_read_context;
+@@ -544,6 +545,15 @@ int conn_poll_init(juice_agent_t *agent, conn_registry_t *registry, udp_socket_c
+ 		return -1;
+ 	}
+ 
++	addr_record_t bound_addr;
++	if (udp_get_bound_addr(conn_impl->udp_sock, &bound_addr) < 0) {
++		JLOG_ERROR("Unable to determine UDP socket family");
++		closesocket(conn_impl->udp_sock);
++		free(conn_impl);
++		return -1;
++	}
++	conn_impl->udp_family = bound_addr.addr.ss_family;
++
+ 	mutex_init(&conn_impl->send_mutex, 0);
+ 	conn_impl->registry = registry;
+ 	conn_impl->tcp_sock = INVALID_SOCKET;
+@@ -635,7 +645,7 @@ int conn_poll_send(juice_agent_t *agent, const addr_record_t *dst, const char *d
+ 				conn_impl->send_ds = -1; // disable for next time
+ 		}
+ 
+-		ret = udp_sendto(conn_impl->udp_sock, data, size, dst);
++		ret = udp_sendto_family(conn_impl->udp_sock, conn_impl->udp_family, data, size, dst);
+ 		if (ret < 0)
+ 			ret = -sockerrno;
+ 	}
+diff --git a/src/udp.c b/src/udp.c
+index fddd773..7693a6a 100644
+--- a/src/udp.c
++++ b/src/udp.c
+@@ -201,21 +201,31 @@ int udp_recvfrom(socket_t sock, char *buffer, size_t size, addr_record_t *src) {
+ 	}
+ }
+ 
+-int udp_sendto(socket_t sock, const char *data, size_t size, const addr_record_t *dst) {
++int udp_sendto_family(socket_t sock, int socket_family, const char *data, size_t size,
++                      const addr_record_t *dst) {
+ #ifndef __linux__
+ 	addr_record_t tmp = *dst;
++	if (socket_family == AF_INET6 && tmp.addr.ss_family == AF_INET)
++		addr_map_inet6_v4mapped(&tmp.addr, &tmp.len);
++	return sendto(sock, data, (socklen_t)size, 0, (const struct sockaddr *)&tmp.addr, tmp.len);
++#else
++	(void)socket_family;
++	return sendto(sock, data, size, 0, (const struct sockaddr *)&dst->addr, dst->len);
++#endif
++}
++
++int udp_sendto(socket_t sock, const char *data, size_t size, const addr_record_t *dst) {
++#ifndef __linux__
+ 	addr_record_t name;
+ 	name.len = sizeof(name.addr);
+ 	name.socktype = SOCK_DGRAM;
+-	if (getsockname(sock, (struct sockaddr *)&name.addr, &name.len) == 0) {
+-		if (name.addr.ss_family == AF_INET6)
+-			addr_map_inet6_v4mapped(&tmp.addr, &tmp.len);
+-	} else {
++	if (getsockname(sock, (struct sockaddr *)&name.addr, &name.len) != 0) {
+ 		JLOG_WARN("getsockname failed, errno=%d", sockerrno);
++		return udp_sendto_family(sock, AF_UNSPEC, data, size, dst);
+ 	}
+-	return sendto(sock, data, (socklen_t)size, 0, (const struct sockaddr *)&tmp.addr, tmp.len);
++	return udp_sendto_family(sock, name.addr.ss_family, data, size, dst);
+ #else
+-	return sendto(sock, data, size, 0, (const struct sockaddr *)&dst->addr, dst->len);
++	return udp_sendto_family(sock, AF_UNSPEC, data, size, dst);
+ #endif
+ }
+ 
+diff --git a/src/udp.h b/src/udp.h
+index c318eec..23acd9b 100644
+--- a/src/udp.h
++++ b/src/udp.h
+@@ -23,6 +23,8 @@ typedef struct udp_socket_config {
+ socket_t udp_create_socket(const udp_socket_config_t *config);
+ int udp_recvfrom(socket_t sock, char *buffer, size_t size, addr_record_t *src);
+ int udp_sendto(socket_t sock, const char *data, size_t size, const addr_record_t *dst);
++int udp_sendto_family(socket_t sock, int socket_family, const char *data, size_t size,
++                      const addr_record_t *dst);
+ int udp_sendto_self(socket_t sock, const char *data, size_t size);
+ int udp_set_diffserv(socket_t sock, int ds);
+ uint16_t udp_get_port(socket_t sock);

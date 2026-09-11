@@ -1,0 +1,11 @@
+build/
+out/
+thirdparty/libjuice/
+thirdparty/libplum/
+thirdparty/ngtcp2/
+*.so
+*.pyd
+*.dylib
+__pycache__/
+*.pyc
+/diagnostics

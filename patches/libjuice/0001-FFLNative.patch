@@ -1,0 +1,614 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3b020a9..d20b75a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -247,6 +247,13 @@ if(NOT NO_TESTS)
+ 	if(WIN32)
+ 		target_link_libraries(juice-tests ws2_32)
+ 	endif()
++
++	add_executable(ffl-extension-tests ${CMAKE_CURRENT_SOURCE_DIR}/test/ffl-extensions.c)
++	target_include_directories(ffl-extension-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include/juice)
++	target_link_libraries(ffl-extension-tests juice Threads::Threads)
++	if(WIN32)
++		target_link_libraries(ffl-extension-tests ws2_32)
++	endif()
+ endif()
+ 
+ # Fuzzer
+diff --git a/include/juice/juice.h b/include/juice/juice.h
+index e43db6c..9ad490c 100644
+--- a/include/juice/juice.h
++++ b/include/juice/juice.h
+@@ -66,6 +66,10 @@ typedef void (*juice_cb_candidate_t)(juice_agent_t *agent, const char *sdp, void
+ typedef void (*juice_cb_gathering_done_t)(juice_agent_t *agent, void *user_ptr);
+ typedef void (*juice_cb_recv_t)(juice_agent_t *agent, const char *data, size_t size,
+                                 void *user_ptr);
++// Called once for a one-shot STUN probe. `mapped` is NULL on failure/timeout.
++// The callback follows the same locking rules as other libjuice callbacks.
++typedef void (*juice_cb_stun_probe_t)(juice_agent_t *agent, const char *server,
++                                      const char *mapped, void *user_ptr);
+ 
+ typedef struct juice_mux_binding_request {
+ 	const char *local_ufrag;
+@@ -122,6 +126,20 @@ JUICE_EXPORT juice_agent_t *juice_create(const juice_config_t *config);
+ JUICE_EXPORT void juice_destroy(juice_agent_t *agent);
+ 
+ JUICE_EXPORT int juice_gather_candidates(juice_agent_t *agent);
++// Hold/release gathering completion while external mapped candidates are acquired.
++// Holds may be nested and should normally be acquired before gathering starts.
++JUICE_EXPORT int juice_hold_gathering(juice_agent_t *agent);
++JUICE_EXPORT int juice_release_gathering(juice_agent_t *agent);
++// Return the UDP port bound by the ICE agent after gathering has started.
++JUICE_EXPORT int juice_get_local_port(juice_agent_t *agent, uint16_t *port);
++// Inject an externally-created UDP mapping (PCP/NAT-PMP/UPnP) as a srflx candidate.
++// `address` must be a numeric IPv4/IPv6 address.
++JUICE_EXPORT int juice_add_local_mapped_candidate(juice_agent_t *agent, const char *address,
++                                                   uint16_t port);
++// Send a one-shot STUN Binding request through the agent's existing UDP socket.
++// No candidate is created and no keepalive is armed. May be called repeatedly.
++JUICE_EXPORT int juice_probe_stun(juice_agent_t *agent, const char *host, uint16_t port,
++                                  juice_cb_stun_probe_t cb, void *user_ptr);
+ JUICE_EXPORT int juice_get_local_description(juice_agent_t *agent, char *buffer, size_t size);
+ JUICE_EXPORT int juice_set_remote_description(juice_agent_t *agent, const char *sdp);
+ JUICE_EXPORT int juice_add_remote_candidate(juice_agent_t *agent, const char *sdp);
+diff --git a/src/agent.c b/src/agent.c
+index 6d1dcf2..d65f3ff 100644
+--- a/src/agent.c
++++ b/src/agent.c
+@@ -342,6 +342,153 @@ int agent_gather_candidates(juice_agent_t *agent) {
+ 	return 0;
+ }
+ 
++int agent_hold_gathering(juice_agent_t *agent) {
++	conn_lock(agent);
++	if (agent->gathering_done) {
++		conn_unlock(agent);
++		return JUICE_ERR_FAILED;
++	}
++	++agent->gathering_holds;
++	conn_unlock(agent);
++	return JUICE_ERR_SUCCESS;
++}
++
++int agent_release_gathering(juice_agent_t *agent) {
++	conn_lock(agent);
++	if (agent->gathering_holds == 0) {
++		conn_unlock(agent);
++		return JUICE_ERR_INVALID;
++	}
++	--agent->gathering_holds;
++	if (agent->conn_impl)
++		agent_update_gathering_done(agent);
++	conn_unlock(agent);
++	if (agent->conn_impl)
++		conn_interrupt(agent);
++	return JUICE_ERR_SUCCESS;
++}
++
++int agent_get_local_port(juice_agent_t *agent, uint16_t *port) {
++	if (!agent->conn_impl)
++		return JUICE_ERR_NOT_AVAIL;
++
++	addr_record_t records[ICE_MAX_CANDIDATES_COUNT];
++	int records_count = conn_get_addrs(agent, records, ICE_MAX_CANDIDATES_COUNT);
++	if (records_count <= 0)
++		return JUICE_ERR_NOT_AVAIL;
++
++	for (int i = 0; i < records_count; ++i) {
++		uint16_t value = addr_get_port((const struct sockaddr *)&records[i].addr);
++		if (value) {
++			*port = value;
++			return JUICE_ERR_SUCCESS;
++		}
++	}
++	return JUICE_ERR_NOT_AVAIL;
++}
++
++int agent_add_local_mapped_candidate(juice_agent_t *agent, const char *address, uint16_t port) {
++	if (!agent->conn_impl)
++		return JUICE_ERR_NOT_AVAIL;
++	if (!addr_is_numeric_hostname(address))
++		return JUICE_ERR_INVALID;
++
++	char service[8];
++	snprintf(service, sizeof(service), "%hu", port);
++	addr_record_t record;
++	if (addr_resolve(address, service, SOCK_DGRAM, &record, 1) != 1)
++		return JUICE_ERR_INVALID;
++
++	conn_lock(agent);
++	if (agent->gathering_done) {
++		conn_unlock(agent);
++		return JUICE_ERR_FAILED;
++	}
++	int ret = agent_add_local_reflexive_candidate(
++	    agent, ICE_CANDIDATE_TYPE_SERVER_REFLEXIVE, &record);
++	conn_unlock(agent);
++	if (ret < 0)
++		return JUICE_ERR_FAILED;
++	conn_interrupt(agent);
++	return JUICE_ERR_SUCCESS;
++}
++
++static void agent_finish_stun_probe(juice_agent_t *agent, agent_stun_entry_t *entry,
++                                    const addr_record_t *mapped) {
++	juice_cb_stun_probe_t cb = entry->probe_callback;
++	void *user_ptr = entry->probe_user_ptr;
++	entry->probe_callback = NULL;
++	entry->probe_user_ptr = NULL;
++	entry->next_transmission = 0;
++	entry->state = mapped ? AGENT_STUN_ENTRY_STATE_SUCCEEDED : AGENT_STUN_ENTRY_STATE_FAILED;
++	if (!cb)
++		return;
++
++	char server_str[ADDR_MAX_STRING_LEN];
++	char mapped_str[ADDR_MAX_STRING_LEN];
++	if (addr_record_to_string(&entry->record, server_str, sizeof(server_str)) < 0)
++		server_str[0] = '\0';
++	const char *mapped_ptr = NULL;
++	if (mapped && addr_record_to_string(mapped, mapped_str, sizeof(mapped_str)) >= 0)
++		mapped_ptr = mapped_str;
++	cb(agent, server_str, mapped_ptr, user_ptr);
++}
++
++int agent_probe_stun(juice_agent_t *agent, const char *host, uint16_t port,
++                     juice_cb_stun_probe_t cb, void *user_ptr) {
++	if (!agent->conn_impl)
++		return JUICE_ERR_NOT_AVAIL;
++	if (!port)
++		port = 3478;
++
++	char service[8];
++	snprintf(service, sizeof(service), "%hu", port);
++	addr_record_t records[2];
++	int records_count = addr_resolve(host, service, SOCK_DGRAM, records, 2);
++	if (records_count <= 0)
++		return JUICE_ERR_FAILED;
++
++	// Prefer IPv4 to make observations from multiple IPv4 STUN servers directly comparable.
++	addr_record_t *record = &records[0];
++	for (int i = 0; i < records_count; ++i) {
++		if (records[i].addr.ss_family == AF_INET) {
++			record = &records[i];
++			break;
++		}
++	}
++
++	conn_lock(agent);
++	agent_stun_entry_t *entry = NULL;
++	for (int i = 0; i < agent->entries_count; ++i) {
++		agent_stun_entry_t *candidate = agent->entries + i;
++		if (candidate->type == AGENT_STUN_ENTRY_TYPE_PROBE &&
++		    candidate->state != AGENT_STUN_ENTRY_STATE_PENDING &&
++		    candidate->probe_callback == NULL) {
++			entry = candidate;
++			break;
++		}
++	}
++	if (!entry) {
++		if (agent->entries_count >= MAX_STUN_ENTRIES_COUNT) {
++			conn_unlock(agent);
++			return JUICE_ERR_NOT_AVAIL;
++		}
++		entry = agent->entries + agent->entries_count++;
++	}
++	memset(entry, 0, sizeof(*entry));
++	entry->type = AGENT_STUN_ENTRY_TYPE_PROBE;
++	entry->state = AGENT_STUN_ENTRY_STATE_PENDING;
++	entry->record = *record;
++	entry->probe_callback = cb;
++	entry->probe_user_ptr = user_ptr;
++	juice_random(entry->transaction_id, STUN_TRANSACTION_ID_SIZE);
++	entry->transaction_id_expired = false;
++	agent_arm_transmission(agent, entry, 0);
++	conn_unlock(agent);
++	conn_interrupt(agent);
++	return JUICE_ERR_SUCCESS;
++}
++
+ int agent_resolve_servers(juice_agent_t *agent) {
+ 	conn_lock(agent);
+ 
+@@ -988,6 +1135,11 @@ int agent_bookkeeping(juice_agent_t *agent, timestamp_t *next_timestamp) {
+ 				agent_update_gathering_done(agent);
+ 				break;
+ 
++			case AGENT_STUN_ENTRY_TYPE_PROBE:
++				JLOG_INFO("STUN probe failed");
++				agent_finish_stun_probe(agent, entry, NULL);
++				break;
++
+ 			default:
+ 				if (entry->pair) {
+ 					JLOG_DEBUG("Candidate pair check failed");
+@@ -1529,6 +1681,11 @@ int agent_process_stun_binding(juice_agent_t *agent, const stun_message_t *msg,
+ 		if (entry->type == AGENT_STUN_ENTRY_TYPE_SERVER)
+ 			JLOG_INFO("STUN server binding successful");
+ 
++		if (entry->type == AGENT_STUN_ENTRY_TYPE_PROBE) {
++			agent_finish_stun_probe(agent, entry, msg->mapped.len && !relayed ? &msg->mapped : NULL);
++			break;
++		}
++
+ 		if (entry->state != AGENT_STUN_ENTRY_STATE_SUCCEEDED_KEEPALIVE) {
+ 			entry->state = AGENT_STUN_ENTRY_STATE_SUCCEEDED;
+ 			entry->next_transmission = 0;
+@@ -1654,6 +1811,9 @@ int agent_process_stun_binding(juice_agent_t *agent, const stun_message_t *msg,
+ 			JLOG_INFO("STUN server binding failed (unrecoverable error)");
+ 			entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
+ 			agent_update_gathering_done(agent);
++		} else if (entry->type == AGENT_STUN_ENTRY_TYPE_PROBE) {
++			JLOG_INFO("STUN probe failed (unrecoverable error)");
++			agent_finish_stun_probe(agent, entry, NULL);
+ 		}
+ 		break;
+ 	}
+@@ -2606,9 +2766,14 @@ void agent_update_pac_timer(juice_agent_t *agent) {
+ 
+ void agent_update_gathering_done(juice_agent_t *agent) {
+ 	JLOG_VERBOSE("Updating gathering status");
++	if (agent->gathering_holds > 0) {
++		JLOG_VERBOSE("Candidate gathering completion is held (%u)", agent->gathering_holds);
++		return;
++	}
+ 	for (int i = 0; i < agent->entries_count; ++i) {
+ 		agent_stun_entry_t *entry = agent->entries + i;
+-		if (entry->type != AGENT_STUN_ENTRY_TYPE_CHECK &&
++		if ((entry->type == AGENT_STUN_ENTRY_TYPE_SERVER ||
++		     entry->type == AGENT_STUN_ENTRY_TYPE_RELAY) &&
+ 		    entry->state == AGENT_STUN_ENTRY_STATE_PENDING) {
+ 			JLOG_VERBOSE("STUN server or relay entry %d is still pending", i);
+ 			return;
+diff --git a/src/agent.h b/src/agent.h
+index bccdde3..7db9043 100644
+--- a/src/agent.h
++++ b/src/agent.h
+@@ -63,6 +63,7 @@
+ // Max STUN and TURN server entries
+ #define MAX_SERVER_ENTRIES_COUNT 2 // max STUN server entries
+ #define MAX_RELAY_ENTRIES_COUNT 2  // max TURN server entries
++#define MAX_PROBE_ENTRIES_COUNT 8  // max concurrent one-shot STUN probes
+ 
+ // Max TURN redirections for ALTERNATE-SERVER mechanism
+ #define MAX_TURN_REDIRECTIONS 1
+@@ -72,7 +73,8 @@
+ #define MAX_HOST_CANDIDATES_COUNT ((ICE_MAX_CANDIDATES_COUNT - MAX_STUN_SERVER_RECORDS_COUNT) / 2)
+ #define MAX_PEER_REFLEXIVE_CANDIDATES_COUNT MAX_HOST_CANDIDATES_COUNT
+ #define MAX_CANDIDATE_PAIRS_COUNT (ICE_MAX_CANDIDATES_COUNT * (1 + MAX_RELAY_ENTRIES_COUNT))
+-#define MAX_STUN_ENTRIES_COUNT (MAX_CANDIDATE_PAIRS_COUNT + MAX_STUN_SERVER_RECORDS_COUNT)
++#define MAX_STUN_ENTRIES_COUNT \
++	(MAX_CANDIDATE_PAIRS_COUNT + MAX_STUN_SERVER_RECORDS_COUNT + MAX_PROBE_ENTRIES_COUNT)
+ 
+ #define AGENT_TURN_MAP_SIZE ICE_MAX_CANDIDATES_COUNT
+ 
+@@ -86,7 +88,8 @@ typedef enum agent_stun_entry_type {
+ 	AGENT_STUN_ENTRY_TYPE_EMPTY,
+ 	AGENT_STUN_ENTRY_TYPE_SERVER,
+ 	AGENT_STUN_ENTRY_TYPE_RELAY,
+-	AGENT_STUN_ENTRY_TYPE_CHECK
++	AGENT_STUN_ENTRY_TYPE_CHECK,
++	AGENT_STUN_ENTRY_TYPE_PROBE
+ } agent_stun_entry_type_t;
+ 
+ typedef enum agent_stun_entry_state {
+@@ -123,6 +126,10 @@ typedef struct agent_stun_entry {
+ 	unsigned int turn_redirections;
+ 	struct agent_stun_entry *relay_entry;
+ 
++	// One-shot STUN probe
++	juice_cb_stun_probe_t probe_callback;
++	void *probe_user_ptr;
++
+ } agent_stun_entry_t;
+ 
+ struct juice_agent {
+@@ -147,6 +154,7 @@ struct juice_agent {
+ 	timestamp_t pac_timestamp; // Patiently Awaiting Connectivity timer
+ 	timestamp_t nomination_timestamp;
+ 	bool gathering_done;
++	unsigned int gathering_holds;
+ 
+ 	conn_registry_t *registry;
+ 	int conn_index;
+@@ -160,6 +168,12 @@ juice_agent_t *agent_create(const juice_config_t *config);
+ void agent_destroy(juice_agent_t *agent);
+ 
+ int agent_gather_candidates(juice_agent_t *agent);
++int agent_hold_gathering(juice_agent_t *agent);
++int agent_release_gathering(juice_agent_t *agent);
++int agent_get_local_port(juice_agent_t *agent, uint16_t *port);
++int agent_add_local_mapped_candidate(juice_agent_t *agent, const char *address, uint16_t port);
++int agent_probe_stun(juice_agent_t *agent, const char *host, uint16_t port,
++                     juice_cb_stun_probe_t cb, void *user_ptr);
+ int agent_resolve_servers(juice_agent_t *agent);
+ int agent_get_local_description(juice_agent_t *agent, char *buffer, size_t size);
+ int agent_set_remote_description(juice_agent_t *agent, const char *sdp);
+diff --git a/src/juice.c b/src/juice.c
+index 074823c..75170ca 100644
+--- a/src/juice.c
++++ b/src/juice.c
+@@ -40,6 +40,38 @@ JUICE_EXPORT int juice_gather_candidates(juice_agent_t *agent) {
+ 	return JUICE_ERR_SUCCESS;
+ }
+ 
++JUICE_EXPORT int juice_hold_gathering(juice_agent_t *agent) {
++	if (!agent)
++		return JUICE_ERR_INVALID;
++	return agent_hold_gathering(agent);
++}
++
++JUICE_EXPORT int juice_release_gathering(juice_agent_t *agent) {
++	if (!agent)
++		return JUICE_ERR_INVALID;
++	return agent_release_gathering(agent);
++}
++
++JUICE_EXPORT int juice_get_local_port(juice_agent_t *agent, uint16_t *port) {
++	if (!agent || !port)
++		return JUICE_ERR_INVALID;
++	return agent_get_local_port(agent, port);
++}
++
++JUICE_EXPORT int juice_add_local_mapped_candidate(juice_agent_t *agent, const char *address,
++                                                   uint16_t port) {
++	if (!agent || !address || !port)
++		return JUICE_ERR_INVALID;
++	return agent_add_local_mapped_candidate(agent, address, port);
++}
++
++JUICE_EXPORT int juice_probe_stun(juice_agent_t *agent, const char *host, uint16_t port,
++                                  juice_cb_stun_probe_t cb, void *user_ptr) {
++	if (!agent || !host || !cb)
++		return JUICE_ERR_INVALID;
++	return agent_probe_stun(agent, host, port, cb, user_ptr);
++}
++
+ JUICE_EXPORT int juice_get_local_description(juice_agent_t *agent, char *buffer, size_t size) {
+ 	if (!agent || (!buffer && size))
+ 		return JUICE_ERR_INVALID;
+diff --git a/test/ffl-extensions.c b/test/ffl-extensions.c
+new file mode 100644
+index 0000000..9742b00
+--- /dev/null
++++ b/test/ffl-extensions.c
+@@ -0,0 +1,239 @@
++/**
++ * FFL native-direct extension tests for libjuice.
++ */
++#include "juice/juice.h"
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#ifdef _WIN32
++#include <windows.h>
++static void sleep_ms(unsigned int ms) { Sleep(ms); }
++#else
++#include <unistd.h>
++static void sleep_ms(unsigned int ms) { usleep(ms * 1000); }
++#endif
++
++static volatile int gathering_done_count;
++static volatile int candidate_count;
++static volatile int probe_count;
++static uint16_t probe_mapped_ports[2];
++static bool mapped_candidate_seen;
++
++static void on_candidate(juice_agent_t *agent, const char *sdp, void *user_ptr) {
++    (void)agent;
++    (void)user_ptr;
++    ++candidate_count;
++    if (strstr(sdp, " typ srflx ") && strstr(sdp, "203.0.113.10"))
++        mapped_candidate_seen = true;
++}
++
++static void on_gathering_done(juice_agent_t *agent, void *user_ptr) {
++    (void)agent;
++    (void)user_ptr;
++    ++gathering_done_count;
++}
++
++static uint16_t parse_port(const char *address) {
++    if (!address)
++        return 0;
++    const char *p = strrchr(address, ':');
++    if (!p)
++        return 0;
++    return (uint16_t)strtoul(p + 1, NULL, 10);
++}
++
++static void on_probe(juice_agent_t *agent, const char *server, const char *mapped, void *user_ptr) {
++    (void)agent;
++    (void)server;
++    (void)user_ptr;
++    int index = probe_count;
++    if (index < 2)
++        probe_mapped_ports[index] = parse_port(mapped);
++    ++probe_count;
++}
++
++static int wait_for(volatile int *value, int target, unsigned int timeout_ms) {
++    while (timeout_ms > 0) {
++        if (*value >= target)
++            return 0;
++        sleep_ms(10);
++        timeout_ms = timeout_ms > 10 ? timeout_ms - 10 : 0;
++    }
++    return -1;
++}
++
++static int test_hold_and_mapped_candidate(juice_concurrency_mode_t mode) {
++    gathering_done_count = 0;
++    candidate_count = 0;
++    mapped_candidate_seen = false;
++
++    juice_config_t config;
++    memset(&config, 0, sizeof(config));
++    config.concurrency_mode = mode;
++    config.cb_candidate = on_candidate;
++    config.cb_gathering_done = on_gathering_done;
++
++    juice_agent_t *agent = juice_create(&config);
++    if (!agent)
++        return -1;
++
++    uint16_t port = 0;
++    if (juice_get_local_port(agent, &port) != JUICE_ERR_NOT_AVAIL)
++        goto fail;
++    if (juice_release_gathering(agent) != JUICE_ERR_INVALID)
++        goto fail;
++    if (juice_hold_gathering(agent) != JUICE_ERR_SUCCESS)
++        goto fail;
++    if (juice_hold_gathering(agent) != JUICE_ERR_SUCCESS)
++        goto fail;
++    if (juice_gather_candidates(agent) != JUICE_ERR_SUCCESS)
++        goto fail;
++    if (juice_get_local_port(agent, &port) != JUICE_ERR_SUCCESS || port == 0)
++        goto fail;
++    if (gathering_done_count != 0)
++        goto fail;
++    if (juice_add_local_mapped_candidate(agent, "not-an-ip", 45678) != JUICE_ERR_INVALID)
++        goto fail;
++    if (juice_add_local_mapped_candidate(agent, "203.0.113.10", 45678) != JUICE_ERR_SUCCESS)
++        goto fail;
++    if (!mapped_candidate_seen)
++        goto fail;
++    int candidates_after_mapping = candidate_count;
++    if (juice_add_local_mapped_candidate(agent, "203.0.113.10", 45678) != JUICE_ERR_SUCCESS)
++        goto fail;
++    if (candidate_count != candidates_after_mapping)
++        goto fail;
++    if (juice_release_gathering(agent) != JUICE_ERR_SUCCESS)
++        goto fail;
++    if (gathering_done_count != 0)
++        goto fail;
++    if (juice_release_gathering(agent) != JUICE_ERR_SUCCESS)
++        goto fail;
++    if (wait_for(&gathering_done_count, 1, 1000) != 0)
++        goto fail;
++    if (juice_release_gathering(agent) != JUICE_ERR_INVALID)
++        goto fail;
++    if (juice_hold_gathering(agent) != JUICE_ERR_FAILED)
++        goto fail;
++
++    juice_destroy(agent);
++    return 0;
++fail:
++    juice_destroy(agent);
++    return -1;
++}
++
++#ifndef NO_SERVER
++static int test_same_socket_stun_probes(juice_concurrency_mode_t mode) {
++    gathering_done_count = 0;
++    candidate_count = 0;
++    probe_count = 0;
++    memset(probe_mapped_ports, 0, sizeof(probe_mapped_ports));
++
++    juice_server_config_t sc1;
++    juice_server_config_t sc2;
++    memset(&sc1, 0, sizeof(sc1));
++    memset(&sc2, 0, sizeof(sc2));
++    sc1.bind_address = "127.0.0.1";
++    sc2.bind_address = "127.0.0.1";
++    sc1.port = 0;
++    sc2.port = 0;
++    juice_server_t *server1 = juice_server_create(&sc1);
++    juice_server_t *server2 = juice_server_create(&sc2);
++    if (!server1 || !server2)
++        goto fail_servers;
++
++    uint16_t server_port1 = juice_server_get_port(server1);
++    uint16_t server_port2 = juice_server_get_port(server2);
++    if (!server_port1 || !server_port2 || server_port1 == server_port2)
++        goto fail_servers;
++
++    juice_config_t config;
++    memset(&config, 0, sizeof(config));
++    config.concurrency_mode = mode;
++    config.bind_address = "127.0.0.1";
++    config.cb_candidate = on_candidate;
++    config.cb_gathering_done = on_gathering_done;
++    juice_agent_t *agent = juice_create(&config);
++    if (!agent)
++        goto fail_servers;
++    if (juice_gather_candidates(agent) != JUICE_ERR_SUCCESS)
++        goto fail_agent;
++    if (wait_for(&gathering_done_count, 1, 1000) != 0)
++        goto fail_agent;
++    uint16_t local_port = 0;
++    if (juice_get_local_port(agent, &local_port) != JUICE_ERR_SUCCESS || local_port == 0)
++        goto fail_agent;
++
++    int baseline_candidates = candidate_count;
++    if (juice_probe_stun(agent, "127.0.0.1", server_port1, on_probe, NULL) != JUICE_ERR_SUCCESS)
++        goto fail_agent;
++    if (juice_probe_stun(agent, "127.0.0.1", server_port2, on_probe, NULL) != JUICE_ERR_SUCCESS)
++        goto fail_agent;
++    if (wait_for(&probe_count, 2, 3000) != 0)
++        goto fail_agent;
++    if (!probe_mapped_ports[0] || probe_mapped_ports[0] != probe_mapped_ports[1])
++        goto fail_agent;
++    if (probe_mapped_ports[0] != local_port)
++        goto fail_agent;
++    if (candidate_count != baseline_candidates)
++        goto fail_agent;
++
++    // Probe entries must be reusable for periodic netchecks. More than the
++    // configured probe-slot count is intentionally exercised here.
++    for (int i = 0; i < 20; ++i) {
++        uint16_t target_port = (i & 1) ? server_port1 : server_port2;
++        int expected = probe_count + 1;
++        if (juice_probe_stun(agent, "127.0.0.1", target_port, on_probe, NULL) !=
++            JUICE_ERR_SUCCESS)
++            goto fail_agent;
++        if (wait_for(&probe_count, expected, 3000) != 0)
++            goto fail_agent;
++    }
++    if (candidate_count != baseline_candidates)
++        goto fail_agent;
++
++    juice_destroy(agent);
++    juice_server_destroy(server1);
++    juice_server_destroy(server2);
++    return 0;
++fail_agent:
++    juice_destroy(agent);
++fail_servers:
++    if (server1)
++        juice_server_destroy(server1);
++    if (server2)
++        juice_server_destroy(server2);
++    return -1;
++}
++#endif
++
++int main(void) {
++    juice_set_log_level(JUICE_LOG_LEVEL_WARN);
++    const juice_concurrency_mode_t modes[] = {
++        JUICE_CONCURRENCY_MODE_POLL,
++        JUICE_CONCURRENCY_MODE_THREAD,
++        JUICE_CONCURRENCY_MODE_MUX,
++    };
++    const char *mode_names[] = {"poll", "thread", "mux"};
++    for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); ++i) {
++        printf("Running FFL gathering/mapped-candidate test (%s)...\n", mode_names[i]);
++        if (test_hold_and_mapped_candidate(modes[i])) {
++            fprintf(stderr, "FFL gathering/mapped-candidate test failed (%s)\n", mode_names[i]);
++            return 1;
++        }
++#ifndef NO_SERVER
++        printf("Running FFL same-socket multi-STUN test (%s)...\n", mode_names[i]);
++        if (test_same_socket_stun_probes(modes[i])) {
++            fprintf(stderr, "FFL same-socket multi-STUN test failed (%s)\n", mode_names[i]);
++            return 1;
++        }
++#endif
++    }
++    printf("FFL extension tests passed\n");
++    return 0;
++}

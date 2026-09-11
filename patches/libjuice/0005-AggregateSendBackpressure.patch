@@ -1,0 +1,266 @@
+diff --git a/include/juice/juice.h b/include/juice/juice.h
+index d3a7aab..bec4dfd 100644
+--- a/include/juice/juice.h
++++ b/include/juice/juice.h
+@@ -173,6 +173,10 @@ JUICE_EXPORT int juice_send(juice_agent_t *agent, const char *data, size_t size)
+ // Platforms with UDP segmentation support may transmit the buffer in one socket call.
+ JUICE_EXPORT int juice_send_aggregate(juice_agent_t *agent, const char *data, size_t size,
+                                       size_t segment_size);
++// Variant of juice_send_aggregate() that reports the successfully transmitted
++// byte prefix when non-blocking backpressure interrupts a segmented send.
++JUICE_EXPORT int juice_send_aggregate_progress(juice_agent_t *agent, const char *data, size_t size,
++                                               size_t segment_size, size_t *sent_size);
+ JUICE_EXPORT int juice_send_diffserv(juice_agent_t *agent, const char *data, size_t size, int ds);
+ JUICE_EXPORT juice_state_t juice_get_state(juice_agent_t *agent);
+ JUICE_EXPORT int juice_get_selected_candidates(juice_agent_t *agent, char *local, size_t local_size,
+diff --git a/src/agent.c b/src/agent.c
+index fec94eb..fafd27a 100644
+--- a/src/agent.c
++++ b/src/agent.c
+@@ -837,9 +837,10 @@ int agent_send(juice_agent_t *agent, const char *data, size_t size, int ds) {
+ }
+ 
+ int agent_send_aggregate(juice_agent_t *agent, const char *data, size_t size, size_t segment_size,
+-                         int ds) {
+-	if (!data || size == 0 || segment_size == 0 || segment_size > size)
++                         int ds, size_t *sent_size) {
++	if (!data || size == 0 || segment_size == 0 || segment_size > size || !sent_size)
+ 		return -1;
++	*sent_size = 0;
+ 
+ 	// The optimized aggregate path is only valid for a direct UDP candidate.
+ 	// TURN and ICE-TCP add their own framing, so preserve datagram boundaries by
+@@ -851,7 +852,8 @@ int agent_send_aggregate(juice_agent_t *agent, const char *data, size_t size, si
+ 	}
+ 
+ 	if (!selected_entry->relay_entry && selected_entry->record.socktype == SOCK_DGRAM)
+-		return conn_send_aggregate(agent, &selected_entry->record, data, size, segment_size, ds);
++		return conn_send_aggregate(agent, &selected_entry->record, data, size, segment_size, ds,
++		                           sent_size);
+ 
+ 	size_t offset = 0;
+ 	while (offset < size) {
+@@ -859,10 +861,13 @@ int agent_send_aggregate(juice_agent_t *agent, const char *data, size_t size, si
+ 		if (segment > segment_size)
+ 			segment = segment_size;
+ 		int ret = agent_send(agent, data + offset, segment, ds);
+-		if (ret < 0)
++		if (ret < 0) {
++			*sent_size = offset;
+ 			return ret;
++		}
+ 		offset += segment;
+ 	}
++	*sent_size = size;
+ 	return (int)size;
+ }
+ 
+diff --git a/src/agent.h b/src/agent.h
+index aac93ac..f214099 100644
+--- a/src/agent.h
++++ b/src/agent.h
+@@ -183,7 +183,7 @@ int agent_add_turn_server(juice_agent_t *agent, const juice_turn_server_t *turn_
+ int agent_set_remote_gathering_done(juice_agent_t *agent);
+ int agent_send(juice_agent_t *agent, const char *data, size_t size, int ds);
+ int agent_send_aggregate(juice_agent_t *agent, const char *data, size_t size, size_t segment_size,
+-                         int ds);
++                         int ds, size_t *sent_size);
+ int agent_direct_send(juice_agent_t *agent, const addr_record_t *dst, const char *data, size_t size,
+                       int ds);
+ int agent_relay_send(juice_agent_t *agent, agent_stun_entry_t *entry, const addr_record_t *dst,
+diff --git a/src/conn.c b/src/conn.c
+index eaa9f5e..0ba5b6f 100644
+--- a/src/conn.c
++++ b/src/conn.c
+@@ -254,12 +254,12 @@ int conn_send(juice_agent_t *agent, const addr_record_t *dst, const char *data,
+ }
+ 
+ int conn_send_aggregate(juice_agent_t *agent, const addr_record_t *dst, const char *data,
+-                        size_t size, size_t segment_size, int ds) {
++                        size_t size, size_t segment_size, int ds, size_t *sent_size) {
+ 	if (!agent->conn_impl)
+ 		return -1;
+ 
+ 	if (agent->config.concurrency_mode == JUICE_CONCURRENCY_MODE_POLL)
+-		return conn_poll_send_aggregate(agent, dst, data, size, segment_size, ds);
++		return conn_poll_send_aggregate(agent, dst, data, size, segment_size, ds, sent_size);
+ 
+ 	// Other concurrency modes keep the existing semantics. FFL uses POLL, but
+ 	// this fallback keeps the extension safe for generic libjuice callers.
+@@ -269,10 +269,13 @@ int conn_send_aggregate(juice_agent_t *agent, const addr_record_t *dst, const ch
+ 		if (segment > segment_size)
+ 			segment = segment_size;
+ 		int ret = conn_send(agent, dst, data + offset, segment, ds);
+-		if (ret < 0)
++		if (ret < 0) {
++			*sent_size = offset;
+ 			return ret;
++		}
+ 		offset += segment;
+ 	}
++	*sent_size = size;
+ 	return (int)size;
+ }
+ 
+diff --git a/src/conn.h b/src/conn.h
+index 98538ad..f42b5b5 100644
+--- a/src/conn.h
++++ b/src/conn.h
+@@ -63,7 +63,7 @@ int conn_interrupt(juice_agent_t *agent);
+ int conn_send(juice_agent_t *agent, const addr_record_t *dst, const char *data, size_t size,
+               int ds);
+ int conn_send_aggregate(juice_agent_t *agent, const addr_record_t *dst, const char *data,
+-                        size_t size, size_t segment_size, int ds);
++                        size_t size, size_t segment_size, int ds, size_t *sent_size);
+ void conn_tcp_connect(juice_agent_t *agent, const addr_record_t *dst);
+ int conn_get_addrs(juice_agent_t *agent, addr_record_t *records, size_t size);
+ 
+diff --git a/src/conn_poll.c b/src/conn_poll.c
+index 0991520..7fbc6f3 100644
+--- a/src/conn_poll.c
++++ b/src/conn_poll.c
+@@ -718,7 +718,7 @@ int conn_poll_send(juice_agent_t *agent, const addr_record_t *dst, const char *d
+ }
+ 
+ int conn_poll_send_aggregate(juice_agent_t *agent, const addr_record_t *dst, const char *data,
+-                             size_t size, size_t segment_size, int ds) {
++                             size_t size, size_t segment_size, int ds, size_t *sent_size) {
+ 	conn_impl_t *conn_impl = agent->conn_impl;
+ 	if (dst->socktype != SOCK_DGRAM)
+ 		return -1;
+@@ -734,7 +734,7 @@ int conn_poll_send_aggregate(juice_agent_t *agent, const addr_record_t *dst, con
+ 	}
+ 
+ 	int ret = udp_sendto_aggregate(conn_impl->udp_sock, conn_impl->udp_family, data, size,
+-	                               segment_size, dst);
++	                               segment_size, dst, sent_size);
+ 	if (ret < 0)
+ 		ret = -sockerrno;
+ 
+diff --git a/src/conn_poll.h b/src/conn_poll.h
+index a151080..74653ce 100644
+--- a/src/conn_poll.h
++++ b/src/conn_poll.h
+@@ -28,7 +28,7 @@ int conn_poll_interrupt(juice_agent_t *agent);
+ int conn_poll_send(juice_agent_t *agent, const addr_record_t *dst, const char *data, size_t size,
+                    int ds);
+ int conn_poll_send_aggregate(juice_agent_t *agent, const addr_record_t *dst, const char *data,
+-                             size_t size, size_t segment_size, int ds);
++                             size_t size, size_t segment_size, int ds, size_t *sent_size);
+ void conn_poll_tcp_connect(juice_agent_t *agent, const addr_record_t *dst);
+ int conn_poll_get_addrs(juice_agent_t *agent, addr_record_t *records, size_t size);
+ 
+diff --git a/src/juice.c b/src/juice.c
+index adad575..b2d974a 100644
+--- a/src/juice.c
++++ b/src/juice.c
+@@ -120,12 +120,13 @@ JUICE_EXPORT int juice_send(juice_agent_t *agent, const char *data, size_t size)
+ 	return juice_send_diffserv(agent, data, size, 0);
+ }
+ 
+-JUICE_EXPORT int juice_send_aggregate(juice_agent_t *agent, const char *data, size_t size,
+-                                      size_t segment_size) {
+-	if (!agent || (!data && size) || segment_size == 0 || segment_size > size)
++JUICE_EXPORT int juice_send_aggregate_progress(juice_agent_t *agent, const char *data, size_t size,
++                                               size_t segment_size, size_t *sent_size) {
++	if (!agent || (!data && size) || segment_size == 0 || segment_size > size || !sent_size)
+ 		return JUICE_ERR_INVALID;
+ 
+-	int ret = agent_send_aggregate(agent, data, size, segment_size, 0);
++	*sent_size = 0;
++	int ret = agent_send_aggregate(agent, data, size, segment_size, 0, sent_size);
+ 	if (ret >= 0)
+ 		return JUICE_ERR_SUCCESS;
+ 	if (ret == -SEAGAIN || ret == -SEWOULDBLOCK)
+@@ -135,6 +136,12 @@ JUICE_EXPORT int juice_send_aggregate(juice_agent_t *agent, const char *data, si
+ 	return JUICE_ERR_FAILED;
+ }
+ 
++JUICE_EXPORT int juice_send_aggregate(juice_agent_t *agent, const char *data, size_t size,
++                                      size_t segment_size) {
++	size_t sent_size = 0;
++	return juice_send_aggregate_progress(agent, data, size, segment_size, &sent_size);
++}
++
+ JUICE_EXPORT int juice_send_diffserv(juice_agent_t *agent, const char *data, size_t size, int ds) {
+ 	if (!agent || (!data && size))
+ 		return JUICE_ERR_INVALID;
+diff --git a/src/udp.c b/src/udp.c
+index 1f2792f..a2a78be 100644
+--- a/src/udp.c
++++ b/src/udp.c
+@@ -230,26 +230,34 @@ int udp_sendto(socket_t sock, const char *data, size_t size, const addr_record_t
+ }
+ 
+ static int udp_sendto_segments(socket_t sock, int socket_family, const char *data, size_t size,
+-                               size_t segment_size, const addr_record_t *dst) {
++                               size_t segment_size, const addr_record_t *dst, size_t *sent_size) {
+ 	size_t offset = 0;
+ 	while (offset < size) {
+ 		size_t segment = size - offset;
+ 		if (segment > segment_size)
+ 			segment = segment_size;
+ 		int ret = udp_sendto_family(sock, socket_family, data + offset, segment, dst);
+-		if (ret < 0)
++		if (ret < 0) {
++			*sent_size = offset;
+ 			return ret;
++		}
+ 		offset += segment;
+ 	}
++	*sent_size = size;
+ 	return (int)size;
+ }
+ 
+ int udp_sendto_aggregate(socket_t sock, int socket_family, const char *data, size_t size,
+-                         size_t segment_size, const addr_record_t *dst) {
+-	if (!data || size == 0 || segment_size == 0 || segment_size > size)
++                         size_t segment_size, const addr_record_t *dst, size_t *sent_size) {
++	if (!data || size == 0 || segment_size == 0 || segment_size > size || !sent_size)
+ 		return -1;
+-	if (size <= segment_size)
+-		return udp_sendto_family(sock, socket_family, data, size, dst);
++	*sent_size = 0;
++	if (size <= segment_size) {
++		int ret = udp_sendto_family(sock, socket_family, data, size, dst);
++		if (ret >= 0)
++			*sent_size = size;
++		return ret;
++	}
+ 
+ #ifdef _WIN32
+ 	// UDP_SEND_MSG_SIZE was added to the Windows 10 20H1 SDK. Define the
+@@ -271,8 +279,10 @@ int udp_sendto_aggregate(socket_t sock, int socket_family, const char *data, siz
+ 		if (setsockopt(sock, IPPROTO_UDP, UDP_SEND_MSG_SIZE, (const char *)&disabled,
+ 		               sizeof(disabled)) != 0)
+ 			JLOG_WARN("Unable to disable UDP send segmentation, errno=%d", sockerrno);
+-		if (ret >= 0)
++		if (ret >= 0) {
++			*sent_size = size;
+ 			return ret;
++		}
+ 
+ 		WSASetLastError(send_error);
+ 		if (send_error != WSAEINVAL && send_error != WSAENOPROTOOPT &&
+@@ -281,7 +291,7 @@ int udp_sendto_aggregate(socket_t sock, int socket_family, const char *data, siz
+ 	}
+ #endif
+ 
+-	return udp_sendto_segments(sock, socket_family, data, size, segment_size, dst);
++	return udp_sendto_segments(sock, socket_family, data, size, segment_size, dst, sent_size);
+ }
+ 
+ int udp_sendto_self(socket_t sock, const char *data, size_t size) {
+diff --git a/src/udp.h b/src/udp.h
+index ecc3cf4..f11f1f9 100644
+--- a/src/udp.h
++++ b/src/udp.h
+@@ -26,7 +26,7 @@ int udp_sendto(socket_t sock, const char *data, size_t size, const addr_record_t
+ int udp_sendto_family(socket_t sock, int socket_family, const char *data, size_t size,
+                       const addr_record_t *dst);
+ int udp_sendto_aggregate(socket_t sock, int socket_family, const char *data, size_t size,
+-                         size_t segment_size, const addr_record_t *dst);
++                         size_t segment_size, const addr_record_t *dst, size_t *sent_size);
+ int udp_sendto_self(socket_t sock, const char *data, size_t size);
+ int udp_set_diffserv(socket_t sock, int ds);
+ uint16_t udp_get_port(socket_t sock);
