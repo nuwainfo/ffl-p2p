@@ -42,6 +42,9 @@ Run the command without `sudo` when building as `root` in a container.
 brew install cmake git pkg-config gnutls python
 ```
 
+`BuildMacOS.sh` discovers Homebrew's GnuTLS prefix automatically. If GnuTLS is
+installed elsewhere, set `FFL_P2P_GNUTLS_ROOT` to that prefix before building.
+
 Install Xcode Command Line Tools if needed:
 
 ```bash

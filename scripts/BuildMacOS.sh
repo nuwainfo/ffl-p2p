@@ -17,9 +17,36 @@ for argument in "$@"; do
     esac
 done
 
-for command in cmake git otool "$PYTHON"; do
+for command in cmake git otool pkg-config "$PYTHON"; do
     command -v "$command" >/dev/null 2>&1 || { echo "Missing required command: $command" >&2; exit 1; }
 done
+
+GNUTLS_ROOT="${FFL_P2P_GNUTLS_ROOT:-}"
+if [[ -z "$GNUTLS_ROOT" ]] && command -v brew >/dev/null 2>&1; then
+    GNUTLS_ROOT="$(brew --prefix gnutls 2>/dev/null || true)"
+fi
+
+for pkgConfigDirectory in "$GNUTLS_ROOT/lib/pkgconfig" "$GNUTLS_ROOT/share/pkgconfig"; do
+    if [[ -f "$pkgConfigDirectory/gnutls.pc" ]]; then
+        export PKG_CONFIG_PATH="$pkgConfigDirectory${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+        echo "Using GnuTLS pkg-config metadata: $pkgConfigDirectory/gnutls.pc"
+        break
+    fi
+done
+
+if ! pkg-config --atleast-version=3.7.5 gnutls; then
+    cat >&2 <<'EOF'
+ffl-p2p requires GnuTLS 3.7.5 or newer for QUIC support.
+
+Install the macOS prerequisites and rerun the build:
+
+  brew install cmake git pkg-config gnutls python
+
+Set FFL_P2P_GNUTLS_ROOT=/path/to/prefix when GnuTLS is installed outside
+Homebrew's default prefix.
+EOF
+    exit 1
+fi
 
 if [[ $CLEAN -eq 1 ]]; then
     rm -rf "$OUT"
