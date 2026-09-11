@@ -53,10 +53,10 @@ namespace ffl::platform {
 
 namespace {
 
+#if defined(__COSMOPOLITAN__)
+
 constexpr size_t kLinuxUserMessageHeaderSize = 56;
 constexpr size_t kLinuxMultiMessageHeaderSize = 64;
-
-#if defined(__COSMOPOLITAN__)
 
 struct LinuxUserMessageHeader {
     void *name;

@@ -64,9 +64,13 @@ namespace {
 
 constexpr size_t kReceiveDatagramSize = 4096;
 constexpr size_t kReceiveAddressSize = JUICE_UDP_RECV_ADDRESS_STORAGE_SIZE;
+
+#if FFL_P2P_HAS_LINUX_GSO
 constexpr size_t kMaxGSOSegments = 64;
 constexpr size_t kProbeSegmentSize = 1200;
 constexpr size_t kProbeSegmentCount = 2;
+#endif
+
 static_assert(sizeof(sockaddr_storage) <= kReceiveAddressSize,
               "juice UDP address storage too small");
 static_assert(JUICE_UDP_RECV_BATCH_CAPACITY <= platform::DatagramBatchReceiver::MaxBatchSize,
