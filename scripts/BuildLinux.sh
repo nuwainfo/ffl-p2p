@@ -16,9 +16,29 @@ for argument in "$@"; do
     esac
 done
 
-for command in cmake git ldd "$PYTHON"; do
+for command in cmake git ldd pkg-config "$PYTHON"; do
     command -v "$command" >/dev/null 2>&1 || { echo "Missing required command: $command" >&2; exit 1; }
 done
+
+GNUTLS_ROOT="${FFL_P2P_GNUTLS_ROOT:-${CONDA_PREFIX:-}}"
+if [[ -n "$GNUTLS_ROOT" && -f "$GNUTLS_ROOT/lib/pkgconfig/gnutls.pc" ]]; then
+    export PKG_CONFIG_PATH="$GNUTLS_ROOT/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    echo "Using GnuTLS pkg-config metadata: $GNUTLS_ROOT/lib/pkgconfig/gnutls.pc"
+fi
+
+if ! pkg-config --atleast-version=3.7.5 gnutls; then
+    cat >&2 <<'EOF'
+ffl-p2p requires GnuTLS 3.7.5 or newer for QUIC support.
+Install a newer system GnuTLS development package, or install GnuTLS in the
+active Conda environment and rerun this command:
+
+  conda install -c conda-forge "gnutls>=3.7.5" pkg-config
+
+Set FFL_P2P_GNUTLS_ROOT=/path/to/prefix when the desired gnutls.pc is outside
+the active Conda environment.
+EOF
+    exit 1
+fi
 
 if [[ $CLEAN -eq 1 ]]; then
     rm -rf "$OUT"
