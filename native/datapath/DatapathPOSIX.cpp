@@ -357,7 +357,10 @@ private:
             return 0;
         }
 
+#if defined(FFL_P2P_DIAGNOSTICS)
         size_t receivedBytes = 0;
+#endif
+
         for (int index = 0; index < receivedCount; ++index) {
             const platform::DatagramReceiveBuffer &buffer =
                 receiveBuffers_[static_cast<size_t>(index)];
@@ -378,11 +381,17 @@ private:
                 &receiveAddresses_[static_cast<size_t>(index)],
                 buffer.sourceAddressSize);
             datagram.source_address_size = buffer.sourceAddressSize;
+
+#if defined(FFL_P2P_DIAGNOSTICS)
             receivedBytes += datagram.size;
+#endif
         }
 
-        FFL_P2P_DATAPATH_DIAGNOSTIC(diagnostics_.recordReceiveBatch(
-            static_cast<size_t>(receivedCount), receivedBytes, false));
+#if defined(FFL_P2P_DIAGNOSTICS)
+        diagnostics_.recordReceiveBatch(
+            static_cast<size_t>(receivedCount), receivedBytes, false);
+#endif
+
         return receivedCount;
     }
 
