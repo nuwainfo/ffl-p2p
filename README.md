@@ -14,12 +14,48 @@ resume, checksums, progress, and HTTP fallback. It provides:
 The share URL remains the signaling and authorization channel. Bulk data uses a
 direct TCP or UDP path when one can be established.
 
-## Requirements
+## Prerequisites
 
-- Python 3.10 or newer
-- Git and CMake
-- A C/C++ compiler: MSVC on Windows, or Clang/GCC on Linux and macOS
-- GnuTLS development headers and libraries for QUIC support
+Install Python 3.10 or newer, Git, CMake, a C/C++ compiler, `pkg-config`, and
+the GnuTLS development package. GnuTLS is required for QUIC support; activating
+a Python or Conda environment alone does not provide its native headers and
+libraries.
+
+### Ubuntu or Debian
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake git pkg-config libgnutls28-dev python3-dev
+```
+
+### RHEL, Rocky Linux, Fedora, or compatible systems
+
+```bash
+sudo dnf install -y gcc gcc-c++ cmake git pkgconf-pkg-config gnutls-devel python3-devel
+```
+
+Run the command without `sudo` when building as `root` in a container.
+
+### macOS
+
+```bash
+brew install cmake git pkg-config gnutls python
+```
+
+Install Xcode Command Line Tools if needed:
+
+```bash
+xcode-select --install
+```
+
+### Windows
+
+Install Visual Studio 2022 with the **Desktop development with C++** workload,
+Python, Git, CMake, and vcpkg. Then install static GnuTLS for the target:
+
+```powershell
+vcpkg install gnutls:x64-windows-static-md
+```
 
 Build scripts fetch pinned libjuice, libplum, and ngtcp2 sources automatically.
 No separate third-party fetch step is required.
