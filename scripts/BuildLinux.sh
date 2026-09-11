@@ -9,12 +9,11 @@ RAW_WHEEL="$OUT/raw-wheel"
 WHEEL_DIR="$OUT/wheel"
 WHEEL_EXTRACT="$OUT/wheel-extract"
 FAKE_PLUM=0
-CLEAN=0
 
 for argument in "$@"; do
     case "$argument" in
         --fake-plum) FAKE_PLUM=1 ;;
-        --clean) CLEAN=1 ;;
+        --clean) : ;; # Kept for compatibility; every Linux build is clean.
         *) echo "Unknown argument: $argument" >&2; exit 2 ;;
     esac
 done
@@ -47,9 +46,38 @@ detect_manylinux_plat() {
     return 1
 }
 
+validate_manylinux_build_host() {
+    local target="$1"
+    local hostGlibc targetMajor targetMinor hostMajor hostMinor
+
+    [[ "$target" =~ ^manylinux_([0-9]+)_([0-9]+)_ ]] || return 0
+    targetMajor="${BASH_REMATCH[1]}"
+    targetMinor="${BASH_REMATCH[2]}"
+    hostGlibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)"
+    [[ "$hostGlibc" =~ ^([0-9]+)\.([0-9]+)$ ]] || return 0
+    hostMajor="${BASH_REMATCH[1]}"
+    hostMinor="${BASH_REMATCH[2]}"
+
+    if (( hostMajor > targetMajor || (hostMajor == targetMajor && hostMinor > targetMinor) )); then
+        cat >&2 <<EOF
+Cannot build $target on this host: its glibc is $hostGlibc.
+Build inside a $target-compatible manylinux image instead. auditwheel can bundle
+third-party libraries, but it cannot lower GLIBC or libstdc++ symbol versions.
+EOF
+        exit 1
+    fi
+}
+
+REQUESTED_MANYLINUX="${MANYLINUX_PLAT:-${AUDITWHEEL_PLAT:-}}"
+if [[ -n "$REQUESTED_MANYLINUX" ]] && ! command -v auditwheel >/dev/null 2>&1; then
+    echo "auditwheel is required for requested target: $REQUESTED_MANYLINUX" >&2
+    exit 1
+fi
+
 MANYLINUX=""
 if MANYLINUX="$(detect_manylinux_plat)"; then
     echo "manylinux     : enabled ($MANYLINUX)"
+    validate_manylinux_build_host "$MANYLINUX"
 else
     echo "manylinux     : not detected; building a native Linux wheel"
 fi
@@ -74,9 +102,9 @@ EOF
     exit 1
 fi
 
-if [[ $CLEAN -eq 1 ]]; then
-    rm -rf "$OUT"
-fi
+# Native extensions and wheels must always be rebuilt together. In particular,
+# never package an extension left by a different Python ABI or CMake cache.
+rm -rf "$OUT"
 
 if ! "$PYTHON" -c 'import build' >/dev/null 2>&1; then
     "$PYTHON" -m pip install --disable-pip-version-check build
@@ -111,6 +139,10 @@ mkdir -p "$RAW_WHEEL" "$WHEEL_DIR"
 rawWheels=("$RAW_WHEEL"/*.whl)
 [[ -f "${rawWheels[0]}" && ${#rawWheels[@]} -eq 1 ]] || {
     echo "Expected one raw wheel." >&2
+    exit 1
+}
+[[ "${rawWheels[0]}" != *-none-any.whl ]] || {
+    echo "The raw wheel is incorrectly tagged as pure Python. Ensure setup.py is present." >&2
     exit 1
 }
 
