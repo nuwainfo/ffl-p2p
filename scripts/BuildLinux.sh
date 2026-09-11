@@ -126,6 +126,11 @@ cmake --build "$BUILD" --target _ffl_p2p --parallel
 
 extension="$(find "$BUILD" -type f -name '_ffl_p2p*.so' -print -quit)"
 [[ -n "$extension" ]] || { echo "Built _ffl_p2p extension was not found" >&2; exit 1; }
+
+# The package directory can contain an extension left by another Python ABI.
+# Remove only Linux extension artifacts before copying this build so a wheel
+# cannot silently contain multiple incompatible native modules.
+find "$ROOT/src/ffl_p2p" -maxdepth 1 -type f -name '_ffl_p2p*.so' -delete
 cp "$extension" "$ROOT/src/ffl_p2p/$(basename "$extension")"
 
 dependencies="$(ldd "$extension")"
