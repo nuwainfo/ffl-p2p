@@ -20,10 +20,17 @@
 import logging
 import os
 import unittest
+
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
 import ffl_p2p.Native as Native
-from ffl_p2p.Native import NativeAgent, NativePortMapping, setLogLevel
+from ffl_p2p.Native import (
+    NativeAgent,
+    NativePortMapping,
+    NativeQUICCredentials,
+    setLogLevel,
+)
 
 
 class NativeTest(unittest.TestCase):
@@ -85,6 +92,18 @@ class NativeTest(unittest.TestCase):
             self.assertTrue(agent.localDescription)
         finally:
             agent.close()
+
+    def testQUICCredentialsSupportConcurrentGeneration(self):
+        def generateCredential(taskIndex):
+            return taskIndex, NativeQUICCredentials().certificate
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            results = list(executor.map(generateCredential, range(4)))
+
+        self.assertEqual(4, len(results))
+        for taskIndex, certificate in results:
+            with self.subTest(taskIndex=taskIndex):
+                self.assertIn('BEGIN CERTIFICATE', certificate)
 
 
 if __name__ == '__main__':

@@ -17,9 +17,9 @@ direct TCP or UDP path when one can be established.
 ## Prerequisites
 
 Install Python 3.10 or newer, Git, CMake, a C/C++ compiler, `pkg-config`, and
-the GnuTLS development package. GnuTLS is required for QUIC support; activating
-a Python or Conda environment alone does not provide its native headers and
-libraries.
+the GnuTLS development package. QUIC is a required transport in this package,
+so GnuTLS 3.7.5 or newer is required to build `ffl-p2p`; activating a Python or
+Conda environment alone does not provide its native headers and libraries.
 
 ### Ubuntu or Debian
 
@@ -62,8 +62,10 @@ Python, Git, CMake, and vcpkg. Then install static GnuTLS for the target:
 vcpkg install gnutls:x64-windows-static-md
 ```
 
-Build scripts fetch pinned libjuice, libplum, and ngtcp2 sources automatically.
-No separate third-party fetch step is required.
+Build scripts fetch pinned libjuice and ngtcp2 sources plus the configured
+libplum ref automatically. libplum defaults to upstream `master` for development;
+release builders should set `FFL_P2P_LIBPLUM_REF` to a tested commit. No separate
+third-party fetch step is required.
 
 ## Build and test
 
@@ -155,14 +157,24 @@ Build the extension for the target package, place it beside the Python package
 as `ffl_p2p/_ffl_p2p`, and deploy the matching Python package and extension to
 both peers.
 
-Linux compatibility switches are available when a network or platform requires
-a conservative UDP path:
+## Runtime environment
+
+Runtime tuning and diagnostics can be selected before starting the process:
 
 ```text
+FFL_P2P_NATIVE_LOGGING_LEVEL=ERROR
+FFL_P2P_QUIC_DISABLE_BATCH=1
+FFL_P2P_QUIC_WRITE_BUFFER_MIB=8
+FFL_P2P_QUIC_WORKERS=2
 FFL_P2P_QUIC_DISABLE_GSO=1
 FFL_P2P_QUIC_DISABLE_RECV_BATCH=1
 FFL_P2P_QUIC_DISABLE_RECV_COALESCING=1
 ```
+
+`FFL_P2P_NATIVE_LOGGING_LEVEL` accepts `DEBUG`, `INFO`, `WARNING`, `ERROR`,
+`CRITICAL`, or `NONE`. `FFL_P2P_QUIC_WRITE_BUFFER_MIB` must be a positive
+integer. `FFL_P2P_QUIC_WORKERS` accepts `1` through `16`; the default is `2`.
+The disable switches accept `1`, `true`, `yes`, or `on`.
 
 ## Performance
 
@@ -179,6 +191,20 @@ network. Reproduce local comparisons with:
 ```bash
 python scripts/PerformanceTest.py --size-mib 64 --iterations 3
 ```
+
+The native QUIC runtime uses a small Worker pool. The default is two Workers,
+which provides protocol-processing parallelism for multiple receivers without
+scaling thread and receive-pool memory to the host CPU count. Connections are
+assigned to Workers round-robin and remain owned by that Worker for their entire
+lifetime.
+
+Set `FFL_P2P_QUIC_WORKERS` before the first QUIC connection to override the pool
+size for profiling or debugging. Valid values are `1` through `16`; invalid
+values fail fast instead of silently falling back. The value is read once per
+process when the runtime Worker pool is initialized, so changing the environment
+later does not resize a live pool. `1` preserves the previous serialized protocol
+execution model, while `2` and `4` are useful A/B values for small multi-receiver
+workloads.
 
 For an APE no-disk transfer, stream generated input with stdin caching disabled
 and receive to `/dev/null`:

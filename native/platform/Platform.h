@@ -28,6 +28,8 @@ limitations under the License.
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <string>
 
 namespace ffl::platform {
 
@@ -36,7 +38,7 @@ constexpr Timestamp InfiniteTimestamp = UINT64_MAX;
 
 Timestamp getCurrentTimestampNS();
 bool isLinux();
-bool isEnvironmentEnabled(const char *name);
+std::optional<std::string> getEnvironmentVariable(const char *name);
 
 class SocketAddress {
 public:

@@ -140,7 +140,7 @@ public:
     void queueDataAsync(const void *data, size_t size, bool fin);
     void close(double timeoutSeconds);
 
-    std::vector<uint8_t> read();
+    datapath::StreamReceiveBatch takeReceivedStreamData();
     bool waitForChange(double timeoutSeconds);
 
     bool isHandshakeComplete() const;
@@ -151,6 +151,7 @@ public:
     bool isWriteAcknowledged() const;
     bool isStreamClosed() const;
     bool isStopped() const;
+    uint16_t workerIndex() const;
     std::string getError() const;
     
 #if defined(FFL_P2P_DIAGNOSTICS)

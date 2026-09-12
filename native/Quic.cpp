@@ -22,10 +22,12 @@ limitations under the License.
 
 #include "Quic.h"
 #include "Agent.h"
+#include "core/Worker.h"
 #include "quic/Connection.h"
 #include "quic/Credentials.h"
 
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -61,13 +63,33 @@ PyObject *createObject(PyTypeObject *type, PyObject *, PyObject *) {
 }
 
 int initializeCredentials(PyQUICCredentials *self, PyObject *, PyObject *) {
+    std::unique_ptr<ffl::quic::Credentials> credentials;
+    std::exception_ptr generationError;
+
+    Py_BEGIN_ALLOW_THREADS
     try {
-        self->state = ffl::quic::generateCredentials().release();
-        return 0;
-    } catch (const std::exception &error) {
-        PyErr_SetString(PyExc_RuntimeError, error.what());
+        credentials = ffl::quic::generateCredentials();
+    } catch (...) {
+        generationError = std::current_exception();
+    }
+    Py_END_ALLOW_THREADS
+
+    if (generationError) {
+        try {
+            std::rethrow_exception(generationError);
+        } catch (const std::exception &error) {
+            PyErr_SetString(PyExc_RuntimeError, error.what());
+        } catch (...) {
+            PyErr_SetString(
+                PyExc_RuntimeError,
+                "QUIC credential generation failed");
+        }
+
         return -1;
     }
+
+    self->state = credentials.release();
+    return 0;
 }
 
 void deallocateCredentials(PyQUICCredentials *self) {
@@ -350,25 +372,37 @@ PyObject *readSession(PyQUICSession *self, PyObject *Py_UNUSED(ignored)) {
     if (!requireConnection(self))
         return nullptr;
 
-    std::vector<uint8_t> data;
-    std::string errorMessage;
-
-    Py_BEGIN_ALLOW_THREADS
     try {
-        data = (*self->connection)->read();
-    } catch (const std::exception &error) {
-        errorMessage = error.what();
-    }
-    Py_END_ALLOW_THREADS
+        auto data = (*self->connection)->takeReceivedStreamData();
+        PyObject *result = PyBytes_FromStringAndSize(
+            nullptr,
+            static_cast<Py_ssize_t>(data.size()));
+        if (!result) {
+            return nullptr;
+        }
 
-    if (!errorMessage.empty()) {
-        PyErr_SetString(PyExc_RuntimeError, errorMessage.c_str());
+        std::exception_ptr copyError;
+        char *destination = PyBytes_AS_STRING(result);
+        const size_t dataSize = data.size();
+
+        Py_BEGIN_ALLOW_THREADS
+        try {
+            data.copyTo(destination, dataSize);
+        } catch (...) {
+            copyError = std::current_exception();
+        }
+        Py_END_ALLOW_THREADS
+
+        if (copyError) {
+            Py_DECREF(result);
+            std::rethrow_exception(copyError);
+        }
+
+        return result;
+    } catch (const std::exception &error) {
+        PyErr_SetString(PyExc_RuntimeError, error.what());
         return nullptr;
     }
-
-    return PyBytes_FromStringAndSize(
-        data.empty() ? "" : reinterpret_cast<const char *>(data.data()),
-        static_cast<Py_ssize_t>(data.size()));
 }
 
 PyObject *closeSession(PyQUICSession *self, PyObject *Py_UNUSED(ignored)) {
@@ -448,6 +482,22 @@ PyObject *getSessionRuntimeV2(PyQUICSession *, void *) {
     Py_RETURN_TRUE;
 }
 
+PyObject *getSessionWorkerIndex(PyQUICSession *self, void *) {
+    if (!requireConnection(self)) {
+        return nullptr;
+    }
+
+    return PyLong_FromUnsignedLong((*self->connection)->workerIndex());
+}
+
+PyObject *getSessionWorkerCount(PyQUICSession *self, void *) {
+    if (!requireConnection(self)) {
+        return nullptr;
+    }
+
+    return PyLong_FromUnsignedLong(ffl::core::getRuntimeWorkerPool().size());
+}
+
 PyMethodDef sessionMethods[] = {
     {"start", FFL_QUIC_PYC_FUNCTION_CAST(startSession), METH_VARARGS | METH_KEYWORDS, nullptr},
     {"queueAsync", FFL_QUIC_PYC_FUNCTION_CAST(queueSessionAsync), METH_VARARGS | METH_KEYWORDS, nullptr},
@@ -467,6 +517,20 @@ PyGetSetDef sessionGetSet[] = {
     {const_cast<char *>("writeAcknowledged"), reinterpret_cast<getter>(getSessionWriteAcknowledged), nullptr, nullptr, nullptr},
     {const_cast<char *>("streamClosed"), reinterpret_cast<getter>(getSessionStreamClosed), nullptr, nullptr, nullptr},
     {const_cast<char *>("runtimeV2"), reinterpret_cast<getter>(getSessionRuntimeV2), nullptr, nullptr, nullptr},
+    {
+        const_cast<char *>("workerIndex"),
+        reinterpret_cast<getter>(getSessionWorkerIndex),
+        nullptr,
+        nullptr,
+        nullptr,
+    },
+    {
+        const_cast<char *>("workerCount"),
+        reinterpret_cast<getter>(getSessionWorkerCount),
+        nullptr,
+        nullptr,
+        nullptr,
+    },
     {nullptr, nullptr, nullptr, nullptr, nullptr}
 };
 

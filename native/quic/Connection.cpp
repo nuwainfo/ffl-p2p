@@ -642,13 +642,13 @@ void Connection::close(double timeoutSeconds) {
         throw std::runtime_error(operationError);
 }
 
-std::vector<uint8_t> Connection::read() {
+datapath::StreamReceiveBatch Connection::takeReceivedStreamData() {
     datapath::StreamReceiveBatch batch(worker_->getStreamReceivePool());
     {
         std::lock_guard<std::mutex> guard(appMutex_);
         appReceiveBatch_.swap(batch);
     }
-    return batch.copyToVector();
+    return batch;
 }
 
 bool Connection::waitForChange(double timeoutSeconds) {
@@ -719,6 +719,10 @@ bool Connection::isStreamClosed() const {
 
 bool Connection::isStopped() const {
     return stopped_.load(std::memory_order_acquire);
+}
+
+uint16_t Connection::workerIndex() const {
+    return worker_->index();
 }
 
 std::string Connection::getError() const {

@@ -165,6 +165,18 @@ void ReceiveBatch::swap(ReceiveBatch &other) {
 
 StreamReceiveBatch::StreamReceiveBatch(StreamReceiveBufferPool &pool) : pool_(&pool) {}
 
+StreamReceiveBatch::StreamReceiveBatch(StreamReceiveBatch &&other) noexcept
+    : pool_(other.pool_),
+      head_(other.head_),
+      tail_(other.tail_),
+      byteCount_(other.byteCount_),
+      bufferCount_(other.bufferCount_) {
+    other.head_ = nullptr;
+    other.tail_ = nullptr;
+    other.byteCount_ = 0;
+    other.bufferCount_ = 0;
+}
+
 StreamReceiveBatch::~StreamReceiveBatch() {
     if (pool_ && head_)
         pool_->releaseChain(head_);
@@ -246,22 +258,28 @@ void StreamReceiveBatch::swap(StreamReceiveBatch &other) {
     std::swap(bufferCount_, other.bufferCount_);
 }
 
-std::vector<uint8_t> StreamReceiveBatch::copyToVector() const {
-    std::vector<uint8_t> result(byteCount_);
+void StreamReceiveBatch::copyTo(void *destination, size_t capacity) const {
+    if (capacity < byteCount_) {
+        throw std::length_error("stream receive destination is too small");
+    }
+
+    if (byteCount_ != 0 && !destination) {
+        throw std::invalid_argument("stream receive destination is null");
+    }
+
+    auto *output = static_cast<uint8_t *>(destination);
     size_t offset = 0;
 
     for (StreamReceiveBuffer *buffer = head_; buffer; buffer = buffer->next_) {
         if (buffer->size() == 0)
             continue;
 
-        std::memcpy(result.data() + offset, buffer->data(), buffer->size());
+        std::memcpy(output + offset, buffer->data(), buffer->size());
         offset += buffer->size();
     }
 
     if (offset != byteCount_)
         throw std::logic_error("stream receive chain byte count mismatch");
-
-    return result;
 }
 
 } // namespace ffl::datapath

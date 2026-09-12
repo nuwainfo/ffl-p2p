@@ -60,6 +60,8 @@ class QUICTest(unittest.TestCase):
                 self.peerFinished = True
 
             def read(self):
+                if not self._chunks:
+                    return b''
                 return self._chunks.pop(0)
 
             def wait(self, timeout):
@@ -68,6 +70,22 @@ class QUICTest(unittest.TestCase):
         stream = object.__new__(QUICStream)
         stream.session = FinishedSession()
         self.assertEqual(b'firstlast', b''.join(stream.iterReceive(timeout=0.1)))
+
+    def testReceiveDrainsDataPublishedWithPeerFinished(self):
+        class FinishedSession:
+            def __init__(self):
+                self._reads = [b'', b'completion']
+                self.peerFinished = True
+
+            def read(self):
+                return self._reads.pop(0)
+
+            def wait(self, timeout):
+                raise AssertionError('finished stream must not require a wait')
+
+        stream = object.__new__(QUICStream)
+        stream.session = FinishedSession()
+        self.assertEqual(b'completion', stream.receive(timeout=0.1))
 
     def testICEUDPQUICResumeOffset(self):
         payload = bytes(range(251)) * (6 * 1024 * 1024 // 251)

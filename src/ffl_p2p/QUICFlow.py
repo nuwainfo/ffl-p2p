@@ -19,32 +19,7 @@
 
 from dataclasses import dataclass
 
-import os
 import time
-
-
-_TRUE_VALUES = {'1', 'true', 'yes', 'on'}
-_DEFAULT_HIGH_WATERMARK_BYTES = 8 * 1024 * 1024
-
-
-def environmentEnabled(name: str) -> bool:
-    return os.getenv(name, '').strip().lower() in _TRUE_VALUES
-
-
-def _writeBufferHighWatermark() -> int:
-    configured = os.getenv('FFL_P2P_QUIC_WRITE_BUFFER_MIB', '').strip()
-    if not configured:
-        return _DEFAULT_HIGH_WATERMARK_BYTES
-
-    try:
-        sizeMiB = int(configured)
-    except ValueError as error:
-        raise ValueError('FFL_P2P_QUIC_WRITE_BUFFER_MIB must be an integer') from error
-
-    if sizeMiB <= 0:
-        raise ValueError('FFL_P2P_QUIC_WRITE_BUFFER_MIB must be positive')
-
-    return sizeMiB * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -53,8 +28,7 @@ class QUICWriteFlowConfiguration:
     lowWatermarkBytes: int
 
     @classmethod
-    def fromEnvironment(cls):
-        highWatermarkBytes = _writeBufferHighWatermark()
+    def fromHighWatermarkBytes(cls, highWatermarkBytes: int):
         return cls(
             highWatermarkBytes=highWatermarkBytes,
             lowWatermarkBytes=max(1, highWatermarkBytes // 2),
@@ -62,19 +36,39 @@ class QUICWriteFlowConfiguration:
 
 
 class QUICWriteFlowController:
-    """Bound producer memory while keeping the native QUIC worker continuously fed."""
+    """Bound producer memory while keeping the native QUIC worker fed."""
 
     def __init__(self, configuration: QUICWriteFlowConfiguration):
         self.configuration = configuration
 
-    def queue(self, session, data: bytes, fin: bool, deadline: float, waitForChange, raiseRuntimeError):
+    def queue(
+        self,
+        session,
+        data: bytes,
+        fin: bool,
+        deadline: float,
+        waitForChange,
+        raiseRuntimeError,
+    ):
         if data:
             self._waitForCapacity(
-                session, len(data), deadline, waitForChange, raiseRuntimeError)
+                session,
+                len(data),
+                deadline,
+                waitForChange,
+                raiseRuntimeError,
+            )
 
         session.queueAsync(data, fin=fin)
 
-    def _waitForCapacity(self, session, dataSize: int, deadline: float, waitForChange, raiseRuntimeError):
+    def _waitForCapacity(
+        self,
+        session,
+        dataSize: int,
+        deadline: float,
+        waitForChange,
+        raiseRuntimeError,
+    ):
         bufferedBytes = session.bufferedWriteBytes
         if self._hasCapacity(bufferedBytes, dataSize):
             return

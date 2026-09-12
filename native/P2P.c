@@ -24,10 +24,7 @@ limitations under the License.
 #include "Agent.h"
 #include "Juice.h"
 #include "Plum.h"
-
-#ifdef FFL_P2P_HAVE_QUIC
 #include "Quic.h"
-#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -501,7 +498,14 @@ static int initializeAgent(PyP2PAgent *self, PyObject *args, PyObject *kwargs) {
     const char *bindAddress = NULL;
     unsigned int portBegin = 0;
     unsigned int portEnd = 0;
-    static char *keywordList[] = {"stunHost", "stunPort", "bindAddress", "portBegin", "portEnd", NULL};
+    static char *keywordList[] = {
+        "stunHost",
+        "stunPort",
+        "bindAddress",
+        "portBegin",
+        "portEnd",
+        NULL
+    };
     FFLP2PJuiceConfig config;
 
     if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|zIzII", keywordList,
@@ -1287,13 +1291,11 @@ PyMODINIT_FUNC PyInit__ffl_p2p(void) {
     PyModule_AddIntConstant(module, "JUICE_STATE_COMPLETED", JUICE_STATE_COMPLETED);
     PyModule_AddIntConstant(module, "JUICE_STATE_FAILED", JUICE_STATE_FAILED);
     PyModule_AddStringConstant(module, "FFL_P2P_NATIVE_BUILD",
-                               "0.2.5");
-#ifdef FFL_P2P_HAVE_QUIC
+                               "0.2.6");
     if (registerFFLP2PQUIC(module) < 0) {
         Py_DECREF(module);
         return NULL;
     }
-#endif
 
     return module;
 }

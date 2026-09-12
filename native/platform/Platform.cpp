@@ -129,31 +129,28 @@ SocketAddress createLoopbackIPv4Address(uint16_t port) {
     return address;
 }
 
-bool isEnvironmentEnabled(const char *name) {
+std::optional<std::string> getEnvironmentVariable(const char *name) {
     if (!name || !*name)
-        return false;
+        return std::nullopt;
 
 #if defined(_MSC_VER)
     char *value = nullptr;
     size_t valueLength = 0;
 
     if (_dupenv_s(&value, &valueLength, name) != 0 || !value)
-        return false;
+        return std::nullopt;
 
     const std::unique_ptr<char, decltype(&std::free)> ownedValue(value, &std::free);
-
     if (valueLength <= 1)
-        return false;
+        return std::nullopt;
 
-    return std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 ||
-           std::strcmp(value, "yes") == 0 || std::strcmp(value, "on") == 0;
+    return std::string(value);
 #else
     const char *value = std::getenv(name);
     if (!value || !*value)
-        return false;
+        return std::nullopt;
 
-    return std::strcmp(value, "1") == 0 || std::strcmp(value, "true") == 0 ||
-           std::strcmp(value, "yes") == 0 || std::strcmp(value, "on") == 0;
+    return std::string(value);
 #endif
 }
 

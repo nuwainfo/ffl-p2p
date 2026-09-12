@@ -292,6 +292,8 @@ public:
     explicit StreamReceiveBatch(StreamReceiveBufferPool &pool);
     StreamReceiveBatch(const StreamReceiveBatch &) = delete;
     StreamReceiveBatch &operator=(const StreamReceiveBatch &) = delete;
+    StreamReceiveBatch(StreamReceiveBatch &&other) noexcept;
+    StreamReceiveBatch &operator=(StreamReceiveBatch &&other) = delete;
     ~StreamReceiveBatch();
 
     bool empty() const;
@@ -300,7 +302,7 @@ public:
     void append(const void *data, size_t size);
     void appendBatch(StreamReceiveBatch &other);
     void swap(StreamReceiveBatch &other);
-    std::vector<uint8_t> copyToVector() const;
+    void copyTo(void *destination, size_t capacity) const;
 
 private:
     StreamReceiveBufferPool *pool_{nullptr};

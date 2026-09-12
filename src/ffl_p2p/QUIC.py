@@ -23,9 +23,8 @@ import time
 from typing import Optional
 
 from .Native import NativeQUICSession
-from .QUICFlow import (
-    QUICWriteFlowConfiguration, QUICWriteFlowController, environmentEnabled,
-)
+from .QUICFlow import QUICWriteFlowConfiguration, QUICWriteFlowController
+from .RuntimeConfiguration import RuntimeConfiguration
 
 
 # Historical Python QUIC diagnostics/profiling helpers are intentionally absent from
@@ -44,7 +43,13 @@ class QUICStream:
     operations and executed by the connection's single owning Worker.
     """
 
-    def __init__(self, udpTransport, role: str, credentials=None, certificate: Optional[str] = None):
+    def __init__(
+        self,
+        udpTransport,
+        role: str,
+        credentials=None,
+        certificate: Optional[str] = None,
+    ):
         if role not in {'client', 'server'}:
             raise ValueError("role must be 'client' or 'server'")
 
@@ -54,9 +59,14 @@ class QUICStream:
         self.certificate = certificate
         self.session = None
         self.runtimeStarted = False
-        self.aggregatePackets = not environmentEnabled('FFL_P2P_QUIC_DISABLE_BATCH')
-        self.writeFlow = QUICWriteFlowController(
-            QUICWriteFlowConfiguration.fromEnvironment())
+
+        configuration = RuntimeConfiguration()
+        self.aggregatePackets = configuration.aggregateQUICPackets
+        highWatermarkBytes = configuration.quicWriteBufferHighWatermarkBytes
+        writeFlowConfiguration = QUICWriteFlowConfiguration.fromHighWatermarkBytes(
+            highWatermarkBytes
+        )
+        self.writeFlow = QUICWriteFlowController(writeFlowConfiguration)
 
     @classmethod
     def client(cls, udpTransport):
@@ -91,7 +101,11 @@ class QUICStream:
         if not self.session.supportsRuntimeV2:
             raise QUICUnavailableError('ffl-p2p native QUIC support is required')
 
-        self.session.start(self.udpTransport.nativeAgent, aggregate=self.aggregatePackets, timeout=timeout)
+        self.session.start(
+            self.udpTransport.nativeAgent,
+            aggregate=self.aggregatePackets,
+            timeout=timeout,
+        )
         self.runtimeStarted = True
 
     def _raiseRuntimeError(self):
@@ -123,23 +137,34 @@ class QUICStream:
             raiseRuntimeError=self._raiseRuntimeError,
         )
 
+    def _readPublishedData(self) -> tuple[bytes, bool]:
+        data = self.session.read()
+        if data:
+            return data, False
+
+        if not self.session.peerFinished:
+            return b'', False
+
+        # ``read`` and ``peerFinished`` are separate native calls. The Worker
+        # can publish the final data and FIN between them, so once FIN is
+        # visible, read once more before treating an empty result as terminal.
+        data = self.session.read()
+        return data, not data
+
     def receive(self, timeout: float = 60.0):
         if self.session is None:
             raise RuntimeError('QUIC stream is not connected')
 
-        data = self.session.read()
-        if data:
+        data, finished = self._readPublishedData()
+        if data or finished:
             return data
-
-        if self.session.peerFinished:
-            return b''
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self.session.wait(timeout=min(0.05, max(0.0, deadline - time.monotonic())))
             self._raiseRuntimeError()
-            data = self.session.read()
-            if data or self.session.peerFinished:
+            data, finished = self._readPublishedData()
+            if data or finished:
                 return data
 
         raise TimeoutError('QUIC stream receive timed out')
@@ -300,7 +325,8 @@ class QUICFileServer:
         receivedBytes = int(payload.get('receivedBytes', -1))
         if receivedBytes != sentBytes:
             raise ValueError(
-                f'QUIC file completion byte mismatch: client={receivedBytes}, server={sentBytes}'
+                'QUIC file completion byte mismatch: '
+                f'client={receivedBytes}, server={sentBytes}'
             )
         return payload
 

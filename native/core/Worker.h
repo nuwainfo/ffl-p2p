@@ -90,13 +90,13 @@ private:
 
 class WorkerPool {
 public:
-    explicit WorkerPool(uint16_t workerCount = 1);
+    explicit WorkerPool(uint16_t workerCount);
     WorkerPool(const WorkerPool &) = delete;
     WorkerPool &operator=(const WorkerPool &) = delete;
     ~WorkerPool();
 
     Worker &assignConnection();
-    uint16_t getWorkerCount() const;
+    uint16_t size() const;
 
 private:
     std::vector<std::unique_ptr<Worker>> workers_;

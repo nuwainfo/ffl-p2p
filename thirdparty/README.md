@@ -8,10 +8,10 @@ Dependencies are real Git checkouts so patches are applied inside the dependency
 repository rather than the enclosing FFL tree.
 
 - `libjuice/`: pinned `v1.7.2`, then the incremental FFL patch series
-  `0001-FFLNative.patch`, `0002-CacheUDPSocketFamily.patch`, and
-  `0003-UDPBatchSend.patch`.
+  `0001-FFLNative.patch` through `0006-DatapathSendHook.patch`.
 - `libplum/`: upstream `master` by default, preserving the existing ffl-p2p policy.
-  Release builders may set `FFL_P2P_LIBPLUM_REF` to a tested commit.
+  Release builders should set `FFL_P2P_LIBPLUM_REF` to a tested commit so a
+  release is reproducible.
 - `ngtcp2/`: pinned `v1.25.0`; fetched exactly like libjuice/libplum. It is not
   pre-vendored in this project.
 

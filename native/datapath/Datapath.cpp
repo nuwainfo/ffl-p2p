@@ -19,7 +19,7 @@ limitations under the License.
 
 #include "datapath/DatapathInternal.h"
 
-#include "platform/Platform.h"
+#include "core/RuntimeConfiguration.h"
 
 #include <cerrno>
 #include <cstring>
@@ -35,10 +35,11 @@ extern "C" FFLP2PDatapath *createFFLP2PDatapath(void) {
         return nullptr;
     }
 
+    const ffl::core::RuntimeConfiguration configuration;
     const ffl::datapath::DatapathOptions options{
-        ffl::platform::isEnvironmentEnabled("FFL_P2P_QUIC_DISABLE_GSO"),
-        ffl::platform::isEnvironmentEnabled("FFL_P2P_QUIC_DISABLE_RECV_BATCH"),
-        ffl::platform::isEnvironmentEnabled("FFL_P2P_QUIC_DISABLE_RECV_COALESCING"),
+        configuration.isSendSegmentationDisabled(),
+        configuration.isReceiveBatchingDisabled(),
+        configuration.isReceiveCoalescingDisabled(),
     };
 
     try {

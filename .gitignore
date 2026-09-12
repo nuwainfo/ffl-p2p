@@ -9,3 +9,4 @@ thirdparty/ngtcp2/
 __pycache__/
 *.pyc
 /diagnostics
+/src/ffl_p2p.egg-info

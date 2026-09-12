@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "core/Worker.h"
 
+#include "core/RuntimeConfiguration.h"
 #include "quic/Connection.h"
 
 #include <stdexcept>
@@ -153,7 +154,7 @@ void Worker::run() {
 #endif
 
             connection->beginWorkerProcessing();
-            
+
 #if defined(FFL_P2P_DIAGNOSTICS)
             const size_t processed = connection->processOperations(kConnectionOperationBudget);
             processedConnections_.fetch_add(1, std::memory_order_relaxed);
@@ -168,7 +169,7 @@ void Worker::run() {
                 timerWheel_.update(connection, connection->getNextExpiry());
             }
             connection->finishWorkerProcessing();
-            
+
 #if defined(FFL_P2P_DIAGNOSTICS)
             diagnostics_.recordConnectionRun(
                 processed, diagnostics_.elapsedSince(processingStartedAt));
@@ -178,7 +179,7 @@ void Worker::run() {
         }
 
         const platform::Timestamp deadline = timerWheel_.getNextExpiry();
-        
+
 #if defined(FFL_P2P_DIAGNOSTICS)
         const bool eventSignaled = ready_.waitUntil(deadline);
         diagnostics_.recordWake(eventSignaled, deadline, platform::getCurrentTimestampNS());
@@ -198,8 +199,9 @@ void Worker::run() {
 }
 
 WorkerPool::WorkerPool(uint16_t workerCount) {
-    if (workerCount == 0)
+    if (workerCount == 0) {
         throw std::invalid_argument("workerCount must be positive");
+    }
 
     workers_.reserve(workerCount);
 
@@ -211,8 +213,9 @@ WorkerPool::WorkerPool(uint16_t workerCount) {
 }
 
 WorkerPool::~WorkerPool() {
-    for (auto &worker : workers_)
+    for (auto &worker : workers_) {
         worker->stop();
+    }
 }
 
 Worker &WorkerPool::assignConnection() {
@@ -220,12 +223,14 @@ Worker &WorkerPool::assignConnection() {
     return *workers_[index % workers_.size()];
 }
 
-uint16_t WorkerPool::getWorkerCount() const {
+uint16_t WorkerPool::size() const {
     return static_cast<uint16_t>(workers_.size());
 }
 
 WorkerPool &getRuntimeWorkerPool() {
-    static WorkerPool pool(1);
+    static const RuntimeConfiguration configuration;
+    static WorkerPool pool(configuration.workerCount());
+
     return pool;
 }
 

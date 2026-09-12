@@ -18,18 +18,19 @@
 # limitations under the License.
 
 import logging
-import os
 import time
 
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional
-    
+
+from .RuntimeConfiguration import RuntimeConfiguration
+
 try:
     from . import _ffl_p2p as nativeModule
 except ImportError:
     # Some embedded builds expose the extension as a top-level CPython builtin.
-    import _ffl_p2p as nativeModule    
+    import _ffl_p2p as nativeModule
 
 
 class NativeUnavailableError(RuntimeError):
@@ -44,17 +45,6 @@ _NATIVE_LOG_LEVEL_NAMES = (
     (logging.CRITICAL, 'fatal'),
 )
 
-_NATIVE_LOG_LEVELS_BY_NAME = {
-    'DEBUG': logging.DEBUG,
-    'INFO': logging.INFO,
-    'WARNING': logging.WARNING,
-    'WARN': logging.WARNING,
-    'ERROR': logging.ERROR,
-    'CRITICAL': logging.CRITICAL,
-    'FATAL': logging.CRITICAL,
-    'NONE': logging.CRITICAL + 1,
-}
-
 _nativeLoggingConfigured = False
 
 
@@ -62,12 +52,12 @@ def setLogLevel(level: int):
     """Set the native libjuice/libplum level from a standard ``logging`` level."""
     if not isinstance(level, int):
         raise TypeError('log level must be an integer from the logging module')
-        
+
     for loggingLevel, nativeLevelName in _NATIVE_LOG_LEVEL_NAMES:
         if level <= loggingLevel:
             nativeModule.setLogLevel(nativeLevelName)
             return
-            
+
     nativeModule.setLogLevel('none')
 
 
@@ -76,14 +66,8 @@ def _configureNativeLogging():
     if _nativeLoggingConfigured:
         return
 
-    configuredName = os.getenv('FFL_P2P_NATIVE_LOGGING_LEVEL', 'ERROR').upper()
-    configuredLevel = _NATIVE_LOG_LEVELS_BY_NAME.get(configuredName)
-    if configuredLevel is None:
-        raise ValueError(
-            'FFL_P2P_NATIVE_LOGGING_LEVEL must be DEBUG, INFO, WARNING, ERROR, CRITICAL, or NONE'
-        )
-        
-    setLogLevel(configuredLevel)
+    configuration = RuntimeConfiguration()
+    setLogLevel(configuration.nativeLoggingLevel)
     _nativeLoggingConfigured = True
 
 
@@ -104,7 +88,7 @@ class NativePortMapping:
     def __init__(self, protocol: str, internalPort: int):
         if nativeModule is None:
             raise NativeUnavailableError("_ffl_p2p native module is not built")
-            
+
         _configureNativeLogging()
         self._mapping = nativeModule.PortMapping(protocol=protocol, internalPort=internalPort)
 
@@ -113,18 +97,18 @@ class NativePortMapping:
 
     def wait(self, timeout: float = 0.5, interval: float = 0.02) -> PortMappingInfo:
         deadline = time.monotonic() + timeout
-        
+
         info = self.query()
         while info.state == 'pending' and time.monotonic() < deadline:
             time.sleep(interval)
             info = self.query()
-            
+
         return info
 
     def close(self):
         if self._mapping is None:
             return
-            
+
         self._mapping.close()
         self._mapping = None
 
@@ -133,7 +117,7 @@ class NativeQUICCredentials:
     def __init__(self):
         if nativeModule is None:
             raise NativeUnavailableError("_ffl_p2p native module is not built")
-            
+
         self._credentials = nativeModule.QUICCredentials()
 
     @property
@@ -153,18 +137,18 @@ class NativeQUICSession:
     def client(cls, certificate: str):
         if nativeModule is None:
             raise NativeUnavailableError("_ffl_p2p native module is not built")
-            
+
         return cls(nativeModule.QUICSession(role='client', certificate=certificate))
 
     @classmethod
     def server(cls, credentials: NativeQUICCredentials, initialPacket: Optional[bytes] = None):
         if nativeModule is None:
             raise NativeUnavailableError("_ffl_p2p native module is not built")
-            
+
         kwargs = {'role': 'server', 'credentials': credentials.native}
         if initialPacket is not None:
             kwargs['initialPacket'] = initialPacket
-            
+
         return cls(nativeModule.QUICSession(**kwargs))
 
     @property
@@ -199,10 +183,18 @@ class NativeQUICSession:
     def supportsRuntimeV2(self):
         return bool(getattr(self._session, 'runtimeV2', False))
 
+    @property
+    def workerIndex(self) -> int:
+        return self._session.workerIndex
+
+    @property
+    def workerCount(self) -> int:
+        return self._session.workerCount
+
     def start(self, agent, aggregate: bool = True, timeout: float = 5.0):
         if not self.supportsRuntimeV2:
             raise NativeUnavailableError('native QUIC support is required')
-            
+
         self._session.start(agent=agent.native, aggregate=aggregate, timeout=timeout)
 
     def queueAsync(self, data: bytes, fin: bool = False):
@@ -230,11 +222,11 @@ class NativeAgent:
                  bindAddress: Optional[str] = None, portBegin: int = 0, portEnd: int = 0):
         if nativeModule is None:
             raise NativeUnavailableError("_ffl_p2p native module is not built")
-            
+
         _configureNativeLogging()
         stunHost = None if stunServer is None else stunServer[0]
         stunPort = 3478 if stunServer is None else stunServer[1]
-        
+
         self._agent = nativeModule.Agent(
             stunHost=stunHost,
             stunPort=stunPort,
@@ -242,7 +234,7 @@ class NativeAgent:
             portBegin=portBegin,
             portEnd=portEnd,
         )
-        
+
         self._pendingEvents = deque()
         if not self._CONNECTED_STATES:
             self._CONNECTED_STATES.update({
@@ -254,7 +246,7 @@ class NativeAgent:
     def native(self):
         if self._agent is None:
             raise RuntimeError('agent is closed')
-            
+
         return self._agent
 
     def gather(self):
@@ -322,7 +314,7 @@ class NativeAgent:
             firstPoll = False
             remaining = max(0.0, deadline - time.monotonic())
             waitTimeout = remaining if timeout > 0 else 0.0
-            
+
             # Native waitEvents is event-driven: libjuice's callback thread wakes
             # this consumer immediately.  Do not reintroduce a millisecond-scale
             # polling sleep here; it directly caps QUIC throughput on low-RTT paths.
@@ -330,23 +322,23 @@ class NativeAgent:
                 events = self._agent.waitEvents(timeout=waitTimeout, maxEvents=128)
             else:
                 events = self._agent.pollEvents(maxEvents=128)
-                
+
             selected = None
             for event in events:
                 if selected is None and event['type'] == eventType:
                     selected = event
                 else:
                     self._pendingEvents.append(event)
-                    
+
             if selected is not None:
                 return selected
-                
+
             if timeout <= 0 or time.monotonic() >= deadline:
                 break
-                
+
             if not hasattr(self._agent, 'waitEvents'):
                 time.sleep(min(0.005, max(0.0, deadline - time.monotonic())))
-                
+
         return None
 
     def waitForConnected(self, timeout: float = 3.0) -> bool:
@@ -355,14 +347,14 @@ class NativeAgent:
             self.pollEvents()
             if self.connected:
                 return True
-                
+
             time.sleep(0.005)
-            
+
         return self.connected
 
     def close(self):
         if self._agent is None:
             return
-            
+
         self._agent.close()
         self._agent = None
