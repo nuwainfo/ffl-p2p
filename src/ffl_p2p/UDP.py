@@ -17,11 +17,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+
 from typing import Optional
 
 from .Configuration import ICEConfiguration
-from .Native import NativeAgent, NativePortMapping
+from .Native import NativeAgent, NativePortMapping, NativeUnavailableError
 from .Transport import UDPTransport
+
+
+logger = logging.getLogger(__name__)
 
 
 class UDPConnector:
@@ -70,12 +75,15 @@ class UDPConnector:
 
         if self.usePortMapping:
             self._agent.holdGathering()
-            
-        self._agent.gather()
 
-        if self.usePortMapping:
-            self._tryPortMapping()
-            self._agent.releaseGathering()
+        try:
+            self._agent.gather()
+
+            if self.usePortMapping:
+                self._tryPortMapping()
+        finally:
+            if self.usePortMapping:
+                self._agent.releaseGathering()
 
         if self._agent.waitForEvent('gatheringDone', self.configuration.gatheringTimeout) is None:
             raise TimeoutError('libjuice candidate gathering timed out')
@@ -85,13 +93,32 @@ class UDPConnector:
         return self._agent.localDescription
 
     def _tryPortMapping(self):
-        self._mapping = NativePortMapping('udp', self._agent.localPort)
-        info = self._mapping.wait(self.configuration.portMappingTimeout)
-        
-        if info.state == 'success':
-            self._agent.addMappedCandidate(info.externalHost, info.externalPort)
+        try:
+            self._mapping = NativePortMapping('udp', self._agent.localPort)
+            info = self._mapping.wait(self.configuration.portMappingTimeout)
+        except (NativeUnavailableError, RuntimeError) as error:
+            logger.debug('UDP port mapping unavailable: %s', error)
+            self._closePortMapping()
             return
-            
+
+        if info.state != 'success':
+            logger.debug('UDP port mapping did not succeed: %s', info.state)
+            self._closePortMapping()
+            return
+
+        try:
+            self._agent.addMappedCandidate(
+                info.externalHost,
+                info.externalPort,
+            )
+        except (RuntimeError, ValueError) as error:
+            logger.debug('UDP mapped candidate rejected: %s', error)
+            self._closePortMapping()
+
+    def _closePortMapping(self):
+        if self._mapping is None:
+            return
+
         self._mapping.close()
         self._mapping = None
 
@@ -130,10 +157,8 @@ class UDPConnector:
         return None
 
     def close(self):
-        if self._mapping:
-            self._mapping.close()
-            self._mapping = None
-            
+        self._closePortMapping()
+
         if self._agent:
             self._agent.close()
             self._agent = None

@@ -22,6 +22,8 @@ import struct
 import threading
 import unittest
 
+from unittest.mock import patch
+
 from ffl_p2p import ICEConfiguration, ICEServer
 from ffl_p2p.UDP import UDPConnector
 
@@ -124,6 +126,31 @@ class UDPTest(unittest.TestCase):
                 finally:
                     offerer.close()
                     answerer.close()
+
+    def testPortMappingFailureStillCompletesRealICEConnection(self):
+        offerer = UDPConnector(usePortMapping=True)
+        answerer = UDPConnector(usePortMapping=True)
+
+        try:
+            with patch(
+                'ffl_p2p.UDP.NativePortMapping',
+                side_effect=RuntimeError('forced mapping failure'),
+            ):
+                offerSDP = offerer.gather()
+                answerer.setRemoteDescription(offerSDP)
+                answerSDP = answerer.gather()
+
+            offerer.setRemoteDescription(answerSDP)
+
+            self.assertIsNotNone(offerer.connect(timeout=2.0))
+            self.assertIsNotNone(answerer.connect(timeout=2.0))
+
+            offerer.agent.send(b'port-mapping-fallback')
+            received = answerer.agent.waitForEvent('receive', 2)
+            self.assertEqual(b'port-mapping-fallback', received['value'])
+        finally:
+            offerer.close()
+            answerer.close()
 
     def testConfiguredSTUNUsesOnlyFirstServer(self):
         firstServer = FakeSTUNServer('203.0.113.31', 45631)

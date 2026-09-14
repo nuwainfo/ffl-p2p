@@ -18,6 +18,7 @@ limitations under the License.
 */
 
 #include "Plum.h"
+#include "Log.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -30,8 +31,16 @@ struct FFLP2PPortMapping {
 static int initialized = 0;
 static plum_log_level_t logLevel = PLUM_LOG_LEVEL_WARN;
 
+static void onLog(plum_log_level_t level, const char *message) {
+    writeFFLP2PNativeLog((int)level, message);
+}
+
 void setFFLP2PPortMappingLogLevel(plum_log_level_t level) {
     logLevel = level;
+
+    if (initialized) {
+        plum_set_log_level(level);
+    }
 }
 
 static void onMapping(int id, plum_state_t state, const plum_mapping_t *mapping) {
@@ -50,6 +59,7 @@ int initializeFFLP2PPortMapping(void) {
 
     memset(&config, 0, sizeof(config));
     config.log_level = logLevel;
+    config.log_callback = onLog;
     config.protocol = PLUM_PROTOCOL_ANY;
     
     result = plum_init(&config);

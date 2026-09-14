@@ -22,7 +22,12 @@ from dataclasses import asdict, dataclass
 from typing import Optional
 
 import json
+import urllib.error
 import urllib.request
+
+
+class P2PSignalingError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -78,8 +83,18 @@ class HTTPSignalingClient(SignalingClient):
             method=method,
         )
         
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            return json.loads(response.read().decode('utf-8'))
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                return json.loads(response.read().decode('utf-8'))
+        except urllib.error.HTTPError as error:
+            raise P2PSignalingError(
+                f'P2P signaling {method} {path} failed: '
+                f'HTTP {error.code} {error.reason}'
+            ) from error
+        except urllib.error.URLError as error:
+            raise P2PSignalingError(
+                f'P2P signaling {method} {path} failed: {error.reason}'
+            ) from error
 
     def getOffer(self) -> P2POffer:
         return P2POffer.fromDict(self._requestJSON('/p2p/offer'))

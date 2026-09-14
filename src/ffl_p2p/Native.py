@@ -48,8 +48,7 @@ _NATIVE_LOG_LEVEL_NAMES = (
 _nativeLoggingConfigured = False
 
 
-def setLogLevel(level: int):
-    """Set the native libjuice/libplum level from a standard ``logging`` level."""
+def _applyNativeLoggingLevel(level: int):
     if not isinstance(level, int):
         raise TypeError('log level must be an integer from the logging module')
 
@@ -61,13 +60,26 @@ def setLogLevel(level: int):
     nativeModule.setLogLevel('none')
 
 
+def setNativeLoggingLevel(level: int):
+    """Set the process-wide native libjuice/libplum logging level."""
+    global _nativeLoggingConfigured
+
+    _applyNativeLoggingLevel(level)
+    _nativeLoggingConfigured = True
+
+
+def setLogLevel(level: int):
+    """Backward-compatible alias for :func:`setNativeLoggingLevel`."""
+    setNativeLoggingLevel(level)
+
+
 def _configureNativeLogging():
     global _nativeLoggingConfigured
     if _nativeLoggingConfigured:
         return
 
     configuration = RuntimeConfiguration()
-    setLogLevel(configuration.nativeLoggingLevel)
+    _applyNativeLoggingLevel(configuration.nativeLoggingLevel)
     _nativeLoggingConfigured = True
 
 

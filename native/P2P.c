@@ -1291,7 +1291,10 @@ PyMODINIT_FUNC PyInit__ffl_p2p(void) {
     PyModule_AddIntConstant(module, "JUICE_STATE_COMPLETED", JUICE_STATE_COMPLETED);
     PyModule_AddIntConstant(module, "JUICE_STATE_FAILED", JUICE_STATE_FAILED);
     PyModule_AddStringConstant(module, "FFL_P2P_NATIVE_BUILD",
-                               "0.2.6");
+                               "0.2.7");
+#ifdef FFL_P2P_FAKE_PLUM
+    PyModule_AddIntConstant(module, "FFL_P2P_FAKE_PLUM", 1);
+#endif
     if (registerFFLP2PQUIC(module) < 0) {
         Py_DECREF(module);
         return NULL;

@@ -18,6 +18,7 @@ limitations under the License.
 */
 
 #include "Juice.h"
+#include "Log.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -28,7 +29,12 @@ struct FFLP2PJuice {
     FFLP2PDatapath *datapath;
 };
 
+static void onLog(juice_log_level_t level, const char *message) {
+    writeFFLP2PNativeLog((int)level, message);
+}
+
 void setFFLP2PJuiceLogLevel(juice_log_level_t level) {
+    juice_set_log_handler(onLog);
     juice_set_log_level(level);
 }
 

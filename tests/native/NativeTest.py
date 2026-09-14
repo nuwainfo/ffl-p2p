@@ -19,6 +19,8 @@
 
 import logging
 import os
+import subprocess
+import sys
 import unittest
 
 from concurrent.futures import ThreadPoolExecutor
@@ -30,6 +32,7 @@ from ffl_p2p.Native import (
     NativePortMapping,
     NativeQUICCredentials,
     setLogLevel,
+    setNativeLoggingLevel,
 )
 
 
@@ -50,6 +53,47 @@ class NativeTest(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             setLogLevel('error')
+
+    def testNativeLoggingRuntimeOverridePreventsEnvironmentReset(self):
+        with mock.patch('ffl_p2p.Native.nativeModule') as nativeModule:
+            with mock.patch('ffl_p2p.Native._nativeLoggingConfigured', False):
+                setNativeLoggingLevel(logging.INFO)
+                Native._configureNativeLogging()
+
+            nativeModule.setLogLevel.assert_called_once_with('info')
+
+    def testPublicNativeLoggingAPI(self):
+        import ffl_p2p
+
+        self.assertIs(ffl_p2p.setNativeLoggingLevel, setNativeLoggingLevel)
+
+    def testNativeDiagnosticsUseStderrAndRuntimeOverride(self):
+        if not getattr(Native.nativeModule, 'FFL_P2P_FAKE_PLUM', False):
+            self.skipTest('requires the deterministic fake-libplum build')
+
+        script = "\n".join((
+            'import logging',
+            'from ffl_p2p.Native import NativePortMapping, setNativeLoggingLevel',
+            'setNativeLoggingLevel(logging.ERROR)',
+            "mapping = NativePortMapping('udp', 40000)",
+            'mapping.close()',
+            'setNativeLoggingLevel(logging.CRITICAL + 1)',
+            "mapping = NativePortMapping('udp', 40001)",
+            'mapping.close()',
+            "print('PAYLOAD')",
+        ))
+        result = subprocess.run(
+            [sys.executable, '-c', script],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual('PAYLOAD\n', result.stdout)
+        self.assertEqual(
+            1,
+            result.stderr.count('ERROR fake libplum diagnostic'),
+        )
 
     def testNativeLoggingUsesEnvironmentOrErrorDefault(self):
         with mock.patch('ffl_p2p.Native.nativeModule') as nativeModule:

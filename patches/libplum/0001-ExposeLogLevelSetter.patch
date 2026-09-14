@@ -1,0 +1,25 @@
+diff --git a/include/plum/plum.h b/include/plum/plum.h
+index e9fae70..be26b6a 100644
+--- a/include/plum/plum.h
++++ b/include/plum/plum.h
+@@ -72,6 +72,7 @@ typedef struct {
+ 
+ PLUM_EXPORT int plum_init(const plum_config_t *config);
+ PLUM_EXPORT int plum_cleanup(void);
++PLUM_EXPORT void plum_set_log_level(plum_log_level_t level);
+ 
+ typedef enum {
+ 	PLUM_IP_PROTOCOL_TCP = 0,
+diff --git a/src/log.c b/src/log.c
+index f956b38..c1b631f 100644
+--- a/src/log.c
++++ b/src/log.c
+@@ -60,7 +60,7 @@ void plum_log_cleanup() {
+ 	mutex_destroy(&log_mutex);
+ }
+ 
+-void plum_set_log_level(plum_log_level_t level) {
++PLUM_EXPORT void plum_set_log_level(plum_log_level_t level) {
+ 	atomic_store(&log_level, level);
+ }
+ 

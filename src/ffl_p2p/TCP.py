@@ -20,6 +20,7 @@
 from dataclasses import dataclass
 
 import ipaddress
+import logging
 import socket
 import time
 import urllib.request
@@ -28,6 +29,9 @@ from typing import Iterable, Optional
 
 from .Native import NativePortMapping, NativeUnavailableError
 from .Transport import HTTPTransport
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -89,22 +93,28 @@ class TCPPublisher:
     def _mappedEndpoint(self):
         try:
             self._mapping = NativePortMapping('tcp', self.port)
-        except (NativeUnavailableError, RuntimeError):
+            info = self._mapping.wait(self.portMappingTimeout)
+        except (NativeUnavailableError, RuntimeError) as error:
+            logger.debug('TCP port mapping unavailable: %s', error)
+            self._closePortMapping()
             return None
-            
-        info = self._mapping.wait(self.portMappingTimeout)
-        if info.state == 'success':
-            return TCPEndpoint(info.externalHost, info.externalPort, self.path)
-            
+
+        if info.state != 'success':
+            logger.debug('TCP port mapping did not succeed: %s', info.state)
+            self._closePortMapping()
+            return None
+
+        return TCPEndpoint(info.externalHost, info.externalPort, self.path)
+
+    def _closePortMapping(self):
+        if self._mapping is None:
+            return
+
         self._mapping.close()
         self._mapping = None
-        
-        return None
 
     def close(self):
-        if self._mapping:
-            self._mapping.close()
-            self._mapping = None
+        self._closePortMapping()
 
 
 class TCPConnector:

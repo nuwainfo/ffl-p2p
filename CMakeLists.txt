@@ -83,6 +83,7 @@ endif()
 set(FFL_P2P_NATIVE_SOURCES
     native/P2P.c
     native/Juice.c
+    native/Log.c
     native/datapath/Buffer.cpp
     native/datapath/Datapath.cpp
     native/platform/Platform.cpp
@@ -213,6 +214,9 @@ endif()
 Python3_add_library(_ffl_p2p MODULE WITH_SOABI
     ${FFL_P2P_NATIVE_SOURCES}
 )
+if(FFL_P2P_FAKE_PLUM)
+    target_compile_definitions(_ffl_p2p PRIVATE FFL_P2P_FAKE_PLUM=1)
+endif()
 target_include_directories(_ffl_p2p PRIVATE
     native
     "${FFL_P2P_LIBJUICE_ROOT}/include"

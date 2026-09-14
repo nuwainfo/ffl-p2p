@@ -31,11 +31,16 @@ typedef struct MappingSlot {
 } MappingSlot;
 
 static int initialized = 0;
+static plum_log_level_t logLevel = PLUM_LOG_LEVEL_NONE;
+static plum_log_callback_t logCallback = NULL;
 static int nextId = 1;
 static MappingSlot mappings[MAX_MAPPINGS];
 
 int plum_init(const plum_config_t *config) {
-    (void)config;
+    if (config) {
+        logLevel = config->log_level;
+        logCallback = config->log_callback;
+    }
 
     initialized = 1;
     return PLUM_ERR_SUCCESS;
@@ -48,8 +53,16 @@ int plum_cleanup(void) {
     return PLUM_ERR_SUCCESS;
 }
 
+void plum_set_log_level(plum_log_level_t level) {
+    logLevel = level;
+}
+
 int plum_create_mapping(const plum_mapping_t *mapping, plum_mapping_callback_t callback) {
     int index;
+
+    if (logCallback && logLevel <= PLUM_LOG_LEVEL_ERROR) {
+        logCallback(PLUM_LOG_LEVEL_ERROR, "fake libplum diagnostic");
+    }
 
     if (!initialized || !mapping || !callback || !mapping->internal_port)
         return PLUM_ERR_INVALID;

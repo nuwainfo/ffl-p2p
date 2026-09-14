@@ -227,3 +227,17 @@ resume behavior, port mapping, and supported compatibility paths.
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+## Version updates
+
+Use `python scripts/UpdateVersion.py X.Y.Z` to update the project version in
+`pyproject.toml`, the Python package, and the native build marker. Native QUIC
+control scripts read the current project version automatically.
+
+## Native logging
+
+`FFL_P2P_NATIVE_LOGGING_LEVEL` sets the initial process-wide native logging
+level. Applications can change it at runtime with
+`ffl_p2p.setNativeLoggingLevel(...)`. Native libjuice/libplum diagnostics are
+written to stderr so stdout remains safe for application payloads.
+

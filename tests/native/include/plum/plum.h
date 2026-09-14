@@ -20,6 +20,7 @@ typedef struct { plum_ip_protocol_t protocol; plum_mapping_protocol_t mapping_pr
 typedef void (*plum_mapping_callback_t)(int id, plum_state_t state, const plum_mapping_t *mapping);
 int plum_init(const plum_config_t *config);
 int plum_cleanup(void);
+void plum_set_log_level(plum_log_level_t level);
 int plum_create_mapping(const plum_mapping_t *mapping, plum_mapping_callback_t callback);
 int plum_query_mapping(int id, plum_state_t *state, plum_mapping_t *mapping);
 int plum_destroy_mapping(int id);
