@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
@@ -108,6 +109,10 @@ class Bootstrapper:
     LIBPLUM_URL = 'https://github.com/paullouisageneau/libplum.git'
     NGTCP2_REF = 'v1.25.0'
     NGTCP2_URL = 'https://github.com/ngtcp2/ngtcp2.git'
+    # vcpkg commit immediately before it upgraded Nettle to 4.0 and delisted
+    # shiftmedia-libgnutls.  The checked-in overlay requires Nettle 3.10.
+    VCPKG_REF = '5812244ec0caf8f5ab9f71cac42d98aea6cc53b8'
+    VCPKG_URL = 'https://github.com/microsoft/vcpkg.git'
     LIBJUICE_PATCH_SHA256 = '953669385890bd8ae10170ceaedbae3a4af312d415a8c276332e6aeccbf4d556'
     LIBJUICE_UDP_FAMILY_CACHE_PATCH_SHA256 = '33bbc912db3d0eae9a6859ef6f797bc275a7f997f89240637c0cb1e2fe029ae6'
     LIBJUICE_UDP_BATCH_PATCH_SHA256 = 'b4a6b5d940114085e16c06d120940401b67d9f8512b581e7bd0581721f827fdb'
@@ -136,6 +141,11 @@ class Bootstrapper:
             os.environ.get('FFL_P2P_NGTCP2_URL', self.NGTCP2_URL),
             self.thirdparty / 'ngtcp2',
             os.environ.get('FFL_P2P_NGTCP2_REF', self.NGTCP2_REF),
+        )
+        self.vcpkg = GitDependency(
+            self.VCPKG_URL,
+            self.thirdparty / 'vcpkg',
+            self.VCPKG_REF,
         )
         self.libjuicePatches = [
             DependencyPatch(
@@ -187,6 +197,96 @@ class Bootstrapper:
         self.ngtcp2.fetch(force=force)
         print('thirdparty ready')
 
+    def bootstrapWindowsVcpkg(self, force: bool = False):
+        """Provision the pinned Windows GnuTLS toolchain from source.
+
+        Official vcpkg no longer supplies the historical MSVC GnuTLS port.
+        The repository-owned overlay restores that port, but it must be used
+        with the last compatible vcpkg baseline rather than current vcpkg.
+        """
+        self.thirdparty.mkdir(exist_ok=True)
+        self.vcpkg.fetch(force=force)
+        self._checkoutVcpkgBaseline()
+
+        overlay = self.root / 'vcpkg-overlays'
+        port = overlay / 'shiftmedia-libgnutls' / 'portfile.cmake'
+        if not port.is_file():
+            raise RuntimeError(f'Windows GnuTLS overlay is missing: {port}')
+
+        executable = self.thirdparty / 'vcpkg' / 'vcpkg.exe'
+        if not executable.is_file():
+            subprocess.run(
+                ['cmd.exe', '/c', 'bootstrap-vcpkg.bat', '-disableMetrics'],
+                cwd=self.thirdparty / 'vcpkg',
+                check=True,
+            )
+
+        if self._hasIncompatibleNettle():
+            print('Removing Nettle 4 packages from the previous vcpkg baseline')
+            subprocess.run(
+                [
+                    str(executable), 'remove', '--recurse',
+                    'nettle:x64-windows', 'nettle:x64-windows-static-md',
+                ],
+                cwd=self.thirdparty / 'vcpkg',
+                check=True,
+            )
+
+        subprocess.run(
+            [
+                str(executable), 'install',
+                'shiftmedia-libgnutls:x64-windows-static-md',
+                'pkgconf:x64-windows',
+                f'--overlay-ports={overlay}',
+            ],
+            cwd=self.thirdparty / 'vcpkg',
+            check=True,
+        )
+
+        expectedPaths = [
+            self.thirdparty / 'vcpkg' / 'installed' / 'x64-windows-static-md' / 'lib' / 'gnutls.lib',
+            self.thirdparty / 'vcpkg' / 'installed' / 'x64-windows' / 'tools' / 'pkgconf' / 'pkgconf.exe',
+        ]
+        missingPaths = [str(path) for path in expectedPaths if not path.is_file()]
+        if missingPaths:
+            raise RuntimeError(
+                'vcpkg completed without the required Windows GnuTLS toolchain: '
+                + ', '.join(missingPaths)
+            )
+        print('Windows vcpkg GnuTLS toolchain ready')
+
+    def _checkoutVcpkgBaseline(self):
+        currentRef = subprocess.check_output(
+            ['git', '-C', str(self.thirdparty / 'vcpkg'), 'rev-parse', 'HEAD'],
+            text=True,
+        ).strip()
+        if currentRef == self.VCPKG_REF:
+            return
+        subprocess.run(
+            [
+                'git', '-C', str(self.thirdparty / 'vcpkg'), 'fetch', '--depth', '1',
+                'origin', self.VCPKG_REF,
+            ],
+            check=True,
+        )
+
+    def _hasIncompatibleNettle(self) -> bool:
+        status = self.thirdparty / 'vcpkg' / 'installed' / 'vcpkg' / 'status'
+        if not status.is_file():
+            return False
+        packages = status.read_text(encoding='utf-8')
+        nettleVersions = re.findall(
+            r'^Package: nettle\r?\nVersion: ([^\r\n]+)', packages, re.MULTILINE,
+        )
+        return any(version != '3.10' for version in nettleVersions)
+        subprocess.run(
+            [
+                'git', '-C', str(self.thirdparty / 'vcpkg'), 'checkout', '--detach',
+                'FETCH_HEAD',
+            ],
+            check=True,
+        )
+
     @staticmethod
     def _applyPatchSeries(patches: list[DependencyPatch]):
         """Apply an ordered patch series without undoing later-patch context.
@@ -220,9 +320,14 @@ def main():
     parser = argparse.ArgumentParser(description='Bootstrap pinned ffl-p2p native dependencies')
     parser.add_argument('--force', action='store_true')
     parser.add_argument('--fake-plum', action='store_true', dest='fakePlum')
+    parser.add_argument('--windows-vcpkg', action='store_true', dest='windowsVcpkg')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    Bootstrapper(root).run(force=args.force, fakePlum=args.fakePlum)
+    bootstrapper = Bootstrapper(root)
+    if args.windowsVcpkg:
+        bootstrapper.bootstrapWindowsVcpkg(force=args.force)
+    else:
+        bootstrapper.run(force=args.force, fakePlum=args.fakePlum)
 
 
 if __name__ == '__main__':

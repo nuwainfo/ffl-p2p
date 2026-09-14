@@ -7,6 +7,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# VsDevCmd.bat can define VCPKG_ROOT to Visual Studio's bundled, manifest-only
+# vcpkg distribution. Reuse an environment root only when it already contains
+# this project's static GnuTLS installation.
+$explicitVcpkgRoot = $VcpkgRoot
+if (-not $explicitVcpkgRoot -and $env:VCPKG_ROOT) {
+    $environmentGnuTLS = Join-Path $env:VCPKG_ROOT "installed\x64-windows-static-md\lib\gnutls.lib"
+    if (Test-Path $environmentGnuTLS) {
+        $explicitVcpkgRoot = $env:VCPKG_ROOT
+    }
+}
+
 function Import-VSDeveloperEnvironment {
     if (
         $env:VSCMD_VER -and
@@ -59,6 +70,8 @@ $buildDirectory = Join-Path $outDirectory "build"
 
 Import-VSDeveloperEnvironment
 
+$VcpkgRoot = $explicitVcpkgRoot
+
 if ($Clean -and (Test-Path $outDirectory)) {
     Remove-Item -LiteralPath $outDirectory -Recurse -Force
 }
@@ -66,22 +79,41 @@ if ($Clean -and (Test-Path $outDirectory)) {
 $bootstrapArguments = @(Join-Path $root "scripts\Bootstrap.py")
 $cmakeArguments = @("-S", $root, "-B", $buildDirectory)
 
-# ngtcp2 is built from the source fetched by Bootstrap.py.  GnuTLS itself is
-# expected from the native toolchain.  When a vcpkg root is supplied (or
-# VCPKG_ROOT is set), use its toolchain so the static-md GnuTLS setup from the
-# supplied smoke test can be reused without vendoring GnuTLS into ffl-p2p.
-if (-not $VcpkgRoot -and $env:VCPKG_ROOT) {
-    $VcpkgRoot = $env:VCPKG_ROOT
+# Visual Studio's bundled VCPKG_ROOT is deliberately ignored above because it
+# is manifest-only and cannot contain this project's GnuTLS dependency.
+if (-not $VcpkgRoot) {
+    Write-Host "=== Provisioning pinned Windows vcpkg GnuTLS toolchain ==="
+    & python (Join-Path $root "scripts\Bootstrap.py") --windows-vcpkg
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows vcpkg GnuTLS provisioning failed"
+    }
+    $VcpkgRoot = Join-Path $root "thirdparty\vcpkg"
 }
+
+# ngtcp2 is built from the source fetched by Bootstrap.py. GnuTLS is supplied
+# through a static-md vcpkg installation, either provisioned above or selected
+# explicitly by the caller.
 if ($VcpkgRoot) {
+    $vcpkgMarker = Join-Path $VcpkgRoot ".vcpkg-root"
+    if (-not (Test-Path $vcpkgMarker)) {
+        New-Item -ItemType File -Path $vcpkgMarker -Force | Out-Null
+    }
     $vcpkgToolchain = Join-Path $VcpkgRoot "scripts\buildsystems\vcpkg.cmake"
     if (-not (Test-Path $vcpkgToolchain)) {
         throw "vcpkg toolchain was not found: $vcpkgToolchain"
     }
     $cmakeArguments += "-DCMAKE_TOOLCHAIN_FILE=$vcpkgToolchain"
     $cmakeArguments += "-DVCPKG_TARGET_TRIPLET=x64-windows-static-md"
+    # The extension statically links GnuTLS and its closure. Avoid vcpkg's
+    # app-local post-build command, which requires vcpkg.exe even when the
+    # supplied toolchain is a portable installed-package tree.
+    $cmakeArguments += "-DVCPKG_APPLOCAL_DEPS=OFF"
 
     $vcpkgInstalled = Join-Path $VcpkgRoot "installed\x64-windows-static-md"
+    $gnutlsLibrary = Join-Path $vcpkgInstalled "lib\gnutls.lib"
+    if (-not (Test-Path $gnutlsLibrary)) {
+        throw "Static GnuTLS library was not found: $gnutlsLibrary"
+    }
     $pkgconf = Get-ChildItem -Path (Join-Path $VcpkgRoot "installed") -Filter "pkgconf.exe" -Recurse -ErrorAction SilentlyContinue |
         Select-Object -First 1 -ExpandProperty FullName
     if (-not $pkgconf) {

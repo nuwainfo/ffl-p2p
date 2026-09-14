@@ -3,6 +3,7 @@ out/
 thirdparty/libjuice/
 thirdparty/libplum/
 thirdparty/ngtcp2/
+thirdparty/vcpkg/
 *.so
 *.pyd
 *.dylib

@@ -56,11 +56,20 @@ xcode-select --install
 ### Windows
 
 Install Visual Studio 2022 with the **Desktop development with C++** workload,
-Python, Git, CMake, and vcpkg. Then install static GnuTLS for the target:
+Python 3.10 or newer, Git, and CMake. No manual vcpkg download or copied
+dependency directory is required: the Windows build fetches its vcpkg checkout
+into the ignored `thirdparty/vcpkg/` directory and builds the required static
+GnuTLS closure on its first run. It needs network access, Visual Studio's C++
+tools, and substantial disk space; later builds reuse that installation.
 
-```powershell
-vcpkg install gnutls:x64-windows-static-md
-```
+This project includes `vcpkg-overlays/shiftmedia-libgnutls`, the historical
+MSVC GnuTLS port verified by the native smoke build. The overlay is deliberately
+paired with vcpkg commit `5812244ec0caf8f5ab9f71cac42d98aea6cc53b8`, whose
+Nettle 3.10 port the GnuTLS project requires. Current upstream vcpkg no longer
+supports its maintained `libgnutls` port on MSVC and has delisted this older
+port, so using an arbitrary current vcpkg checkout will not reproduce this
+build. Restoring a supported upstream MSVC GnuTLS port remains the long-term
+solution; the overlay plus pinned baseline is the reproducible interim one.
 
 Build scripts fetch pinned libjuice and ngtcp2 sources plus the configured
 libplum ref automatically. libplum defaults to upstream `master` for development;
@@ -73,13 +82,20 @@ Run commands from the repository root.
 
 ### Windows
 
-Install GnuTLS through vcpkg, then build with its root when it is not already
-discoverable by CMake:
+Build normally; on a fresh clone the first command provisions the pinned vcpkg
+toolchain automatically:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\BuildNative.ps1 -Clean
+python scripts\Test.py
+```
+
+To reuse a compatible toolchain outside the checkout, pass it explicitly
+instead:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\BuildNative.ps1 -Clean `
-  -VcpkgRoot C:\path\to\vcpkg
-python scripts\Test.py
+  -VcpkgRoot C:\path\to\prepared-vcpkg
 ```
 
 ### Linux
@@ -240,4 +256,3 @@ control scripts read the current project version automatically.
 level. Applications can change it at runtime with
 `ffl_p2p.setNativeLoggingLevel(...)`. Native libjuice/libplum diagnostics are
 written to stderr so stdout remains safe for application payloads.
-

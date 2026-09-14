@@ -23,10 +23,20 @@ import subprocess
 import tempfile
 import unittest
 
-from scripts.Bootstrap import DependencyPatch, GitDependency
+from scripts.Bootstrap import Bootstrapper, DependencyPatch, GitDependency
 
 
 class ThirdpartyTest(unittest.TestCase):
+    def testWindowsGnuTLSOverlayMatchesPinnedVcpkgBaseline(self):
+        root = Path(__file__).resolve().parents[1]
+        overlay = root / 'vcpkg-overlays' / 'shiftmedia-libgnutls'
+
+        self.assertTrue((overlay / 'portfile.cmake').is_file())
+        self.assertTrue((overlay / 'vcpkg.json').is_file())
+        self.assertIn('pkgconfig.patch', (overlay / 'portfile.cmake').read_text())
+        self.assertIn('"nettle"', (overlay / 'vcpkg.json').read_text())
+        self.assertEqual('5812244ec0caf8f5ab9f71cac42d98aea6cc53b8', Bootstrapper.VCPKG_REF)
+
     def testDependencyPatchStaysInsideDependencyRepositoryAndIsIdempotent(self):
         with tempfile.TemporaryDirectory() as temporaryDirectory:
             root = Path(temporaryDirectory)
