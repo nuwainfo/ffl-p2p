@@ -139,13 +139,13 @@ if ($Diagnostics) {
     $cmakeArguments += "-DFFL_P2P_ENABLE_DIAGNOSTICS=OFF"
 }
 
-Write-Host "=== 1/3 Bootstrap pinned native dependencies ==="
+Write-Host "=== 1/4 Bootstrap pinned native dependencies ==="
 & python @bootstrapArguments
 if ($LASTEXITCODE -ne 0) {
     throw "Native dependency bootstrap failed"
 }
 
-Write-Host "=== 2/3 Configure and build native extension ==="
+Write-Host "=== 2/4 Configure and build native extension ==="
 & cmake @cmakeArguments
 if ($LASTEXITCODE -ne 0) {
     throw "CMake configure failed"
@@ -164,6 +164,52 @@ if (-not $extension) {
 $target = Join-Path $root "src\ffl_p2p\$($extension.Name)"
 Copy-Item -LiteralPath $extension.FullName -Destination $target -Force
 
-Write-Host "=== 3/3 Verify static third-party linkage ==="
+Write-Host "=== 3/4 Verify static third-party linkage ==="
 Assert-StaticThirdPartyLinkage $extension.FullName
-Write-Host "[PASS] Native Windows build completed: $target"
+Write-Host "Native extension ready: $target"
+
+Write-Host "=== 4/4 Build wheel ==="
+$wheelDirectory = Join-Path $outDirectory "wheel"
+$wheelExtractDirectory = Join-Path $outDirectory "wheel-extract"
+New-Item -ItemType Directory -Force -Path $wheelDirectory | Out-Null
+
+& python -c "import build"
+if ($LASTEXITCODE -ne 0) {
+    & python -m pip install --disable-pip-version-check build
+    if ($LASTEXITCODE -ne 0) {
+        throw "Wheel build requirement installation failed"
+    }
+}
+
+# setup.py packages whatever extension is already sitting in src\ffl_p2p
+# (just copied above), matching the same python -m build step already used
+# in scripts/BuildLinux.sh and scripts/BuildMacOS.sh -- it does not invoke
+# CMake itself.
+& python -m build --wheel --no-isolation --outdir $wheelDirectory $root
+if ($LASTEXITCODE -ne 0) {
+    throw "Wheel build failed"
+}
+
+$wheel = Get-ChildItem -LiteralPath $wheelDirectory -Filter 'ffl_p2p-*.whl' |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+if (-not $wheel) {
+    throw "Wheel build completed without producing an ffl_p2p wheel"
+}
+if ($wheel.Name -like '*-none-any.whl') {
+    throw "The wheel is incorrectly tagged as pure Python; the native extension was not packaged"
+}
+
+if (Test-Path $wheelExtractDirectory) {
+    Remove-Item -LiteralPath $wheelExtractDirectory -Recurse -Force
+}
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::ExtractToDirectory($wheel.FullName, $wheelExtractDirectory)
+$wheelExtension = Get-ChildItem -LiteralPath $wheelExtractDirectory -Recurse -Filter '_ffl_p2p*.pyd' |
+    Select-Object -First 1
+if (-not $wheelExtension) {
+    throw "Built wheel does not contain the _ffl_p2p extension"
+}
+Assert-StaticThirdPartyLinkage $wheelExtension.FullName
+
+Write-Host "[PASS] Native Windows wheel build completed: $($wheel.FullName)"
