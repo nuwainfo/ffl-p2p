@@ -183,7 +183,7 @@ int handshakeConfirmedCallback(ngtcp2_conn *, void *userData) {
     return 0;
 }
 
-int receiveStreamDataCallback(ngtcp2_conn *conn, uint32_t flags, int64_t streamID,
+int receiveStreamDataCallback(ngtcp2_conn *, uint32_t flags, int64_t streamID,
                               uint64_t offset, const uint8_t *data, size_t dataLength,
                               void *userData, void *) {
     auto *state = static_cast<Connection::ProtocolState *>(userData);
@@ -194,14 +194,12 @@ int receiveStreamDataCallback(ngtcp2_conn *conn, uint32_t flags, int64_t streamI
     if (state->rxStreamID != streamID || offset != state->rxOffset)
         return NGTCP2_ERR_CALLBACK_FAILURE;
 
+    // The peer gets flow-control credit back only when the application has taken the data
+    // (Connection::takeReceivedStreamData), not on arrival: otherwise a sender faster than the
+    // reader keeps being allowed to send, and everything queues here without bound.
     if (dataLength) {
         state->owner->appendReceivedStreamData(data, dataLength);
         state->rxOffset += dataLength;
-
-        if (ngtcp2_conn_extend_max_stream_offset(conn, streamID, dataLength) != 0)
-            return NGTCP2_ERR_CALLBACK_FAILURE;
-
-        ngtcp2_conn_extend_max_offset(conn, dataLength);
     }
 
     if (flags & NGTCP2_STREAM_DATA_FLAG_FIN) {
@@ -648,6 +646,13 @@ datapath::StreamReceiveBatch Connection::takeReceivedStreamData() {
         std::lock_guard<std::mutex> guard(appMutex_);
         appReceiveBatch_.swap(batch);
     }
+
+    // What the application took may now be sent again.  ngtcp2 belongs to the worker, so only
+    // count it here; the first count since the worker last released credit schedules it.
+    const uint64_t takenBytes = static_cast<uint64_t>(batch.size());
+    if (takenBytes && releasableStreamReceiveBytes_.fetch_add(takenBytes, std::memory_order_acq_rel) == 0)
+        queueInternalOperation(core::OperationType::ReleaseStreamRecvCredit);
+
     return batch;
 }
 
@@ -963,6 +968,9 @@ void Connection::processOperation(core::Operation &operation) {
     case core::OperationType::Shutdown:
         processShutdown();
         break;
+    case core::OperationType::ReleaseStreamRecvCredit:
+        processReleaseStreamReceiveCredit();
+        break;
     }
 }
 
@@ -1107,6 +1115,23 @@ void Connection::processStreamReceive() {
     }
 
     appCondition_.notify_all();
+}
+
+void Connection::processReleaseStreamReceiveCredit() {
+    assertWorkerOwner();
+    const uint64_t releasedBytes = releasableStreamReceiveBytes_.exchange(0, std::memory_order_acq_rel);
+
+    if (!releasedBytes || !protocol_->conn || protocol_->rxStreamID < 0)
+        return;
+
+    // A stream that is gone already takes no credit (ngtcp2 returns 0 then).
+    if (ngtcp2_conn_extend_max_stream_offset(protocol_->conn, protocol_->rxStreamID, releasedBytes) != 0)
+        throw std::runtime_error("QUIC stream receive credit could not be extended");
+
+    ngtcp2_conn_extend_max_offset(protocol_->conn, releasedBytes);
+
+    // Tell the peer now: MAX_STREAM_DATA/MAX_DATA go out with the next packets.
+    queueSendFlush();
 }
 
 void Connection::processSendFlush() {

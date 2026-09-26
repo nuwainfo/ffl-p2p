@@ -230,6 +230,7 @@ private:
     void processSend(core::Operation &operation);
     void processReceive();
     void processStreamReceive();
+    void processReleaseStreamReceiveCredit();
     void processSendFlush();
     void processTimer();
     void processShutdown();
@@ -285,6 +286,8 @@ private:
     bool receiveOperationPending_{false};
     bool streamReceiveOperationPending_{false};
     bool peerFinishedPending_{false};
+    // Stream bytes the application took whose flow-control credit the worker has not given back yet.
+    std::atomic<uint64_t> releasableStreamReceiveBytes_{0};
     bool sendOperationPending_{false};
     PendingSend pendingSend_;
     platform::Timestamp sendRetryExpiry_{platform::InfiniteTimestamp};

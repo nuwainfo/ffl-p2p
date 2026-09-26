@@ -38,6 +38,7 @@ enum class OperationType : uint8_t {
     FlushSend = 4,
     TimerExpired = 5,
     Shutdown = 6,
+    ReleaseStreamRecvCredit = 7,
 };
 
 class Completion {
