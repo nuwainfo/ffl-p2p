@@ -62,6 +62,7 @@ class QUICStream:
 
         configuration = RuntimeConfiguration()
         self.aggregatePackets = configuration.aggregateQUICPackets
+        self.maxDatagramBytes = configuration.udpMaxDatagramBytes
         highWatermarkBytes = configuration.quicWriteBufferHighWatermarkBytes
         writeFlowConfiguration = QUICWriteFlowConfiguration.fromHighWatermarkBytes(
             highWatermarkBytes
@@ -105,6 +106,7 @@ class QUICStream:
             self.udpTransport.nativeAgent,
             aggregate=self.aggregatePackets,
             timeout=timeout,
+            maxDatagramSize=self.maxDatagramBytes,
         )
         self.runtimeStarted = True
 

@@ -23,6 +23,7 @@ import os
 
 _TRUE_VALUES = {'1', 'true', 'yes', 'on'}
 _DEFAULT_QUIC_WRITE_BUFFER_BYTES = 8 * 1024 * 1024
+_MINIMUM_QUIC_DATAGRAM_BYTES = 1200
 _NATIVE_LOG_LEVELS_BY_NAME = {
     'DEBUG': logging.DEBUG,
     'INFO': logging.INFO,
@@ -85,6 +86,29 @@ class RuntimeConfiguration:
             )
 
         return sizeMiB * 1024 * 1024
+
+    @property
+    def udpMaxDatagramBytes(self) -> int:
+        """Largest UDP payload the native QUIC send path accepts, 0 for no limit.
+
+        Emulates an interface with a smaller MTU: larger datagrams are refused the way the kernel
+        refuses them (EMSGSIZE).  A real limit is never below the 1200 bytes QUIC requires.
+        """
+        configured = self._environment.get('FFL_P2P_UDP_MAX_DATAGRAM_BYTES', '').strip()
+        if not configured:
+            return 0
+
+        try:
+            limit = int(configured)
+        except ValueError as error:
+            raise ValueError('FFL_P2P_UDP_MAX_DATAGRAM_BYTES must be an integer') from error
+
+        if limit != 0 and limit < _MINIMUM_QUIC_DATAGRAM_BYTES:
+            raise ValueError(
+                f'FFL_P2P_UDP_MAX_DATAGRAM_BYTES must be 0 or at least {_MINIMUM_QUIC_DATAGRAM_BYTES}'
+            )
+
+        return limit
 
     def _isEnvironmentEnabled(self, name: str) -> bool:
         configured = self._environment.get(name, '')

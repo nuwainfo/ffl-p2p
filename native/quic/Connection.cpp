@@ -559,7 +559,8 @@ Connection::~Connection() {
     binding_.detach();
 }
 
-void Connection::start(void *agentHandle, bool aggregatePackets, double timeoutSeconds) {
+void Connection::start(void *agentHandle, bool aggregatePackets, double timeoutSeconds,
+                       size_t maxDatagramSize) {
     if (!agentHandle)
         throw std::invalid_argument("QUIC runtime requires an ICE agent");
 
@@ -567,6 +568,7 @@ void Connection::start(void *agentHandle, bool aggregatePackets, double timeoutS
         throw std::runtime_error("QUIC runtime is already started");
 
     aggregatePackets_.store(aggregatePackets, std::memory_order_relaxed);
+    binding_.limitDatagramSize(maxDatagramSize);
     binding_.attach(agentHandle, this);
 
     core::Operation operation;
@@ -728,6 +730,10 @@ bool Connection::isStopped() const {
 
 uint16_t Connection::workerIndex() const {
     return worker_->index();
+}
+
+uint64_t Connection::tooLargeSendDrops() const {
+    return tooLargeSendDrops_.load(std::memory_order_relaxed);
 }
 
 std::string Connection::getError() const {
@@ -1306,7 +1312,9 @@ ice::SendResult Connection::sendTransportOnce(const uint8_t *data, size_t size,
         runtimeDiagnostics_.elapsedSince(diagnosticsStartedAt), result.sentSize);
 #endif
 
-    if (result.sentSize != 0)
+    // A dropped TooLarge datagram also ends the send attempt of what ngtcp2 wrote: without the update its length
+    // would be charged to the pacing of the next packets. sentSize stays 0, nothing reached the wire.
+    if (result.sentSize != 0 || result.status == ice::SendStatus::TooLarge)
         ngtcp2_conn_update_pkt_tx_time(protocol_->conn, platform::getCurrentTimestampNS());
 
     return result;
@@ -1383,6 +1391,14 @@ Connection::TransportSendOutcome Connection::sendTransportBuffer(
         return TransportSendOutcome::Complete;
     }
 
+    if (result.status == ice::SendStatus::TooLarge) {
+        // ngtcp2 PMTUD may generate a probe larger than the local or path MTU. When the kernel rejects
+        // it with EMSGSIZE, treat it as lost; never retry the same oversized datagram.
+        tooLargeSendDrops_.fetch_add(1, std::memory_order_relaxed);
+        clearSendRetry();
+        return TransportSendOutcome::Complete;
+    }
+
 #if defined(FFL_P2P_DIAGNOSTICS)
     recordSendBackpressure(size - result.sentSize);
 #endif
@@ -1403,6 +1419,14 @@ Connection::TransportSendOutcome Connection::flushPendingTransportSend() {
         data, remaining, pendingSend_.segmentSize, pendingSend_.aggregate, true);
 
     pendingSend_.offset += result.sentSize;
+
+    if (result.status == ice::SendStatus::TooLarge) {
+        // Same as in sendTransportBuffer: the rest of the batch is lost, not retried.
+        tooLargeSendDrops_.fetch_add(1, std::memory_order_relaxed);
+        pendingSend_.clear();
+        clearSendRetry();
+        return TransportSendOutcome::Complete;
+    }
 
     if (result.status == ice::SendStatus::Complete) {
         if (pendingSend_.hasRemainingData())

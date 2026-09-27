@@ -77,14 +77,24 @@ SendResult translateSendResult(int result, size_t size, size_t sentSize, const c
     if (result == JUICE_ERR_AGAIN)
         return {SendStatus::Blocked, sentSize};
 
+    if (result == JUICE_ERR_TOO_LARGE)
+        return {SendStatus::TooLarge, sentSize};
+
     throw std::runtime_error(std::string(operation) + " failed: " + std::to_string(result));
 }
 
 } // namespace
 
+void JuiceBinding::limitDatagramSize(size_t limit) {
+    datagramLimit_ = limit;
+}
+
 SendResult JuiceBinding::send(const void *data, size_t size) {
     if (!agentHandle_)
         throw std::runtime_error("ICE binding is detached");
+
+    if (datagramLimit_ && size > datagramLimit_)
+        return translateSendResult(JUICE_ERR_TOO_LARGE, size, 0, "libjuice QUIC send");
 
     const int result = sendFFLP2PAgentNative(agentHandle_, data, size);
     const size_t sentSize = result == JUICE_ERR_SUCCESS ? size : 0;
@@ -95,6 +105,9 @@ SendResult JuiceBinding::send(const void *data, size_t size) {
 SendResult JuiceBinding::sendAggregate(const void *data, size_t size, size_t segmentSize) {
     if (!agentHandle_)
         throw std::runtime_error("ICE binding is detached");
+
+    if (datagramLimit_ && segmentSize > datagramLimit_)
+        return translateSendResult(JUICE_ERR_TOO_LARGE, size, 0, "libjuice QUIC aggregate send");
 
     size_t sentSize = 0;
     const int result = sendFFLP2PAgentNativeAggregateProgress(

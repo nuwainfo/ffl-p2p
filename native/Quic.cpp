@@ -242,16 +242,23 @@ PyObject *startSession(PyQUICSession *self, PyObject *args, PyObject *kwargs) {
     PyObject *agentObject = nullptr;
     int aggregate = 1;
     double timeout = 5.0;
+    Py_ssize_t maxDatagramSize = 0;
     static char *keywordList[] = {
         const_cast<char *>("agent"),
         const_cast<char *>("aggregate"),
         const_cast<char *>("timeout"),
+        const_cast<char *>("maxDatagramSize"),
         nullptr
     };
 
-    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|pd", keywordList,
-                                     &agentObject, &aggregate, &timeout))
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "O|pdn", keywordList,
+                                     &agentObject, &aggregate, &timeout, &maxDatagramSize))
         return nullptr;
+
+    if (maxDatagramSize < 0) {
+        PyErr_SetString(PyExc_ValueError, "maxDatagramSize must not be negative");
+        return nullptr;
+    }
 
     if (timeout <= 0.0) {
         PyErr_SetString(PyExc_ValueError, "timeout must be positive");
@@ -272,7 +279,8 @@ PyObject *startSession(PyQUICSession *self, PyObject *args, PyObject *kwargs) {
 
     Py_BEGIN_ALLOW_THREADS
     try {
-        (*self->connection)->start(agentHandle, aggregate != 0, timeout);
+        (*self->connection)->start(
+            agentHandle, aggregate != 0, timeout, static_cast<size_t>(maxDatagramSize));
         if (self->initialPacket && !self->initialPacket->empty()) {
             (*self->connection)->queueReceive(
                 self->initialPacket->data(), self->initialPacket->size());
@@ -490,6 +498,14 @@ PyObject *getSessionWorkerIndex(PyQUICSession *self, void *) {
     return PyLong_FromUnsignedLong((*self->connection)->workerIndex());
 }
 
+PyObject *getSessionTooLargeSendDrops(PyQUICSession *self, void *) {
+    if (!requireConnection(self)) {
+        return nullptr;
+    }
+
+    return PyLong_FromUnsignedLongLong((*self->connection)->tooLargeSendDrops());
+}
+
 PyObject *getSessionWorkerCount(PyQUICSession *self, void *) {
     if (!requireConnection(self)) {
         return nullptr;
@@ -527,6 +543,13 @@ PyGetSetDef sessionGetSet[] = {
     {
         const_cast<char *>("workerCount"),
         reinterpret_cast<getter>(getSessionWorkerCount),
+        nullptr,
+        nullptr,
+        nullptr,
+    },
+    {
+        const_cast<char *>("tooLargeSendDrops"),
+        reinterpret_cast<getter>(getSessionTooLargeSendDrops),
         nullptr,
         nullptr,
         nullptr,

@@ -32,6 +32,9 @@ namespace ffl::ice {
 enum class SendStatus : uint8_t {
     Complete = 0,
     Blocked = 1,
+    // The datagram is larger than the interface or path accepts (EMSGSIZE). It was not sent and must not be
+    // retried as it is: for QUIC it is a lost packet.
+    TooLarge = 2,
 };
 
 struct SendResult {
@@ -54,6 +57,10 @@ public:
     void detach();
     bool isAttached() const;
 
+    // Emulates an interface with a smaller MTU: a datagram larger than limit is refused the way the
+    // kernel refuses it (libjuice reports JUICE_ERR_TOO_LARGE). Zero means no limit.
+    void limitDatagramSize(size_t limit);
+
     SendResult send(const void *data, size_t size);
     SendResult sendAggregate(const void *data, size_t size, size_t segmentSize);
 
@@ -62,6 +69,7 @@ private:
 
     void *agentHandle_{nullptr};
     quic::Connection *connection_{nullptr};
+    size_t datagramLimit_{0};
 };
 
 } // namespace ffl::ice

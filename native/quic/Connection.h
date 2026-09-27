@@ -136,7 +136,8 @@ public:
     Connection &operator=(const Connection &) = delete;
     ~Connection();
 
-    void start(void *agentHandle, bool aggregatePackets, double timeoutSeconds);
+    void start(void *agentHandle, bool aggregatePackets, double timeoutSeconds,
+               size_t maxDatagramSize = 0);
     void queueDataAsync(const void *data, size_t size, bool fin);
     void close(double timeoutSeconds);
 
@@ -152,6 +153,8 @@ public:
     bool isStreamClosed() const;
     bool isStopped() const;
     uint16_t workerIndex() const;
+    // Sends dropped because the datagram was larger than the interface accepts (EMSGSIZE).
+    uint64_t tooLargeSendDrops() const;
     std::string getError() const;
     
 #if defined(FFL_P2P_DIAGNOSTICS)
@@ -278,6 +281,7 @@ private:
     std::atomic<bool> stopped_{false};
     std::atomic<bool> started_{false};
     std::atomic<bool> aggregatePackets_{true};
+    std::atomic<uint64_t> tooLargeSendDrops_{0};
     ice::JuiceBinding binding_;
 
     mutable std::mutex receiveMutex_;

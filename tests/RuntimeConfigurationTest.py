@@ -29,6 +29,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
 
         self.assertEqual(logging.ERROR, configuration.nativeLoggingLevel)
         self.assertTrue(configuration.aggregateQUICPackets)
+        self.assertEqual(0, configuration.udpMaxDatagramBytes)
         self.assertEqual(
             8 * 1024 * 1024,
             configuration.quicWriteBufferHighWatermarkBytes,
@@ -39,10 +40,12 @@ class RuntimeConfigurationTest(unittest.TestCase):
             'FFL_P2P_NATIVE_LOGGING_LEVEL': 'debug',
             'FFL_P2P_QUIC_DISABLE_BATCH': 'YES',
             'FFL_P2P_QUIC_WRITE_BUFFER_MIB': '16',
+            'FFL_P2P_UDP_MAX_DATAGRAM_BYTES': '1300',
         })
 
         self.assertEqual(logging.DEBUG, configuration.nativeLoggingLevel)
         self.assertFalse(configuration.aggregateQUICPackets)
+        self.assertEqual(1300, configuration.udpMaxDatagramBytes)
         self.assertEqual(
             16 * 1024 * 1024,
             configuration.quicWriteBufferHighWatermarkBytes,
@@ -65,6 +68,16 @@ class RuntimeConfigurationTest(unittest.TestCase):
 
                 with self.assertRaises(ValueError):
                     configuration.quicWriteBufferHighWatermarkBytes
+
+    def testInvalidMaxDatagramFailsFast(self):
+        for value in ('invalid', '-1', '1199'):
+            with self.subTest(value=value):
+                configuration = RuntimeConfiguration({
+                    'FFL_P2P_UDP_MAX_DATAGRAM_BYTES': value,
+                })
+
+                with self.assertRaises(ValueError):
+                    configuration.udpMaxDatagramBytes
 
 
 if __name__ == '__main__':

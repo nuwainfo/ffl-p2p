@@ -203,11 +203,18 @@ class NativeQUICSession:
     def workerCount(self) -> int:
         return self._session.workerCount
 
-    def start(self, agent, aggregate: bool = True, timeout: float = 5.0):
+    @property
+    def tooLargeSendDrops(self) -> int:
+        """Datagrams dropped because the interface refused their size (EMSGSIZE), like lost packets."""
+        return self._session.tooLargeSendDrops
+
+    def start(self, agent, aggregate: bool = True, timeout: float = 5.0, maxDatagramSize: int = 0):
         if not self.supportsRuntimeV2:
             raise NativeUnavailableError('native QUIC support is required')
 
-        self._session.start(agent=agent.native, aggregate=aggregate, timeout=timeout)
+        self._session.start(
+            agent=agent.native, aggregate=aggregate, timeout=timeout, maxDatagramSize=maxDatagramSize
+        )
 
     def queueAsync(self, data: bytes, fin: bool = False):
         self._session.queueAsync(data, fin=fin)
