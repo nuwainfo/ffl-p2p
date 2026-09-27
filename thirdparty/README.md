@@ -8,7 +8,7 @@ Dependencies are real Git checkouts so patches are applied inside the dependency
 repository rather than the enclosing FFL tree.
 
 - `libjuice/`: pinned `v1.7.2`, then the incremental FFL patch series
-  `0001-FFLNative.patch` through `0006-DatapathSendHook.patch`.
+  `0001-FFLNative.patch` through `0007-ConsentSendRetry.patch`.
 - `libplum/`: upstream `master` by default, plus
   `0001-ExposeLogLevelSetter.patch` so ffl-p2p can update the native log level
   after libplum initialization. Release builders should set

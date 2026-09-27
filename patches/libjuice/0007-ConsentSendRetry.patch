@@ -1,0 +1,259 @@
+diff --git a/include/juice/juice.h b/include/juice/juice.h
+index d8923e4..125a641 100644
+--- a/include/juice/juice.h
++++ b/include/juice/juice.h
+@@ -102,6 +102,20 @@ typedef int (*juice_cb_udp_send_aggregate_t)(
+     const uint8_t *destination_address, size_t destination_address_size,
+     const char *data, size_t size, size_t segment_size,
+     size_t *sent_size, int *socket_error, void *user_ptr);
++
++#define JUICE_UDP_SEND_NOT_HANDLED 0
++#define JUICE_UDP_SEND_HANDLED 1
++#define JUICE_UDP_SEND_FAILED -1
++
++// Optional single-datagram counterpart of the aggregate-send hook, for every
++// other direct UDP send of the agent (STUN checks and consent requests, and
++// application datagrams sent with juice_send). Return NOT_HANDLED to use
++// libjuice's normal send. A failed handled send stores the platform error code
++// in socket_error; a would-block error is reported like a full socket buffer.
++typedef int (*juice_cb_udp_send_t)(uintptr_t socket_handle, int socket_family,
++                                   const uint8_t *destination_address,
++                                   size_t destination_address_size, const char *data,
++                                   size_t size, int *socket_error, void *user_ptr);
+ // Called once for a one-shot STUN probe. `mapped` is NULL on failure/timeout.
+ // The callback follows the same locking rules as other libjuice callbacks.
+ typedef void (*juice_cb_stun_probe_t)(juice_agent_t *agent, const char *server,
+@@ -155,10 +169,12 @@ typedef struct juice_config {
+ 	juice_cb_recv_t cb_recv;
+ 	juice_cb_udp_recv_batch_t cb_udp_recv_batch;
+ 	juice_cb_udp_send_aggregate_t cb_udp_send_aggregate;
++	juice_cb_udp_send_t cb_udp_send;
+ 
+ 	void *user_ptr;
+ 	void *udp_recv_batch_user_ptr;
+ 	void *udp_send_aggregate_user_ptr;
++	void *udp_send_user_ptr;
+ 
+ } juice_config_t;
+ 
+diff --git a/src/agent.c b/src/agent.c
+index 215c2ee..48fd939 100644
+--- a/src/agent.c
++++ b/src/agent.c
+@@ -109,9 +109,11 @@ juice_agent_t *agent_create(const juice_config_t *config) {
+ 	agent->config.cb_recv = config->cb_recv;
+ 	agent->config.cb_udp_recv_batch = config->cb_udp_recv_batch;
+ 	agent->config.cb_udp_send_aggregate = config->cb_udp_send_aggregate;
++	agent->config.cb_udp_send = config->cb_udp_send;
+ 	agent->config.user_ptr = config->user_ptr;
+ 	agent->config.udp_recv_batch_user_ptr = config->udp_recv_batch_user_ptr;
+ 	agent->config.udp_send_aggregate_user_ptr = config->udp_send_aggregate_user_ptr;
++	agent->config.udp_send_user_ptr = config->udp_send_user_ptr;
+ 	if (alloc_failed) {
+ 		JLOG_FATAL("Memory allocation for configuration copy failed");
+ 		goto error;
+@@ -1245,7 +1247,16 @@ int agent_bookkeeping(juice_agent_t *agent, timestamp_t *next_timestamp) {
+ 
+ 			if (ret < 0) {
+ 				JLOG_WARN("Sending keepalive failed");
++#if defined(JUICE_DISABLE_CONSENT_FRESHNESS) && JUICE_DISABLE_CONSENT_FRESHNESS
+ 				agent_arm_transmission(agent, entry, STUN_KEEPALIVE_PERIOD);
++#else
++				// A consent request that could not leave the host (typically a send buffer kept
++				// full by bulk data) was never a check: retry it soon. Waiting a keepalive period
++				// twice would let consent expire (CONSENT_TIMEOUT) on a path that still works.
++				agent_arm_transmission(agent, entry,
++				                       entry->pair ? MIN_STUN_RETRANSMISSION_TIMEOUT
++				                                   : STUN_KEEPALIVE_PERIOD);
++#endif
+ 				continue;
+ 			}
+ 
+diff --git a/src/conn_poll.c b/src/conn_poll.c
+index 606286d..6d82540 100644
+--- a/src/conn_poll.c
++++ b/src/conn_poll.c
+@@ -699,9 +699,23 @@ int conn_poll_send(juice_agent_t *agent, const addr_record_t *dst, const char *d
+ 				conn_impl->send_ds = -1; // disable for next time
+ 		}
+ 
+-		ret = udp_sendto_family(conn_impl->udp_sock, conn_impl->udp_family, data, size, dst);
+-		if (ret < 0)
+-			ret = -sockerrno;
++		int socket_error = 0;
++		int hook_result = JUICE_UDP_SEND_NOT_HANDLED;
++		if (agent->config.cb_udp_send)
++			hook_result = agent->config.cb_udp_send(
++			    (uintptr_t)conn_impl->udp_sock, conn_impl->udp_family,
++			    (const uint8_t *)&dst->addr, (size_t)dst->len, data, size, &socket_error,
++			    agent->config.udp_send_user_ptr);
++
++		if (hook_result == JUICE_UDP_SEND_HANDLED) {
++			ret = (int)size;
++		} else if (hook_result == JUICE_UDP_SEND_FAILED) {
++			ret = socket_error > 0 ? -socket_error : -1;
++		} else {
++			ret = udp_sendto_family(conn_impl->udp_sock, conn_impl->udp_family, data, size, dst);
++			if (ret < 0)
++				ret = -sockerrno;
++		}
+ 	}
+ 
+ 	if (ret < 0) {
+diff --git a/test/ffl-extensions.c b/test/ffl-extensions.c
+index 9742b00..595ceaa 100644
+--- a/test/ffl-extensions.c
++++ b/test/ffl-extensions.c
+@@ -11,9 +11,12 @@
+ 
+ #ifdef _WIN32
+ #include <windows.h>
++#define WOULD_BLOCK_ERROR WSAEWOULDBLOCK
+ static void sleep_ms(unsigned int ms) { Sleep(ms); }
+ #else
++#include <errno.h>
+ #include <unistd.h>
++#define WOULD_BLOCK_ERROR EAGAIN
+ static void sleep_ms(unsigned int ms) { usleep(ms * 1000); }
+ #endif
+ 
+@@ -212,6 +215,127 @@ fail_servers:
+ }
+ #endif
+ 
++static volatile int consent_gathering_done[2];
++static volatile int consent_failed;
++static volatile int stun_requests_to_fail;
++static volatile int stun_requests_failed;
++
++static void on_consent_state_changed(juice_agent_t *agent, juice_state_t state, void *user_ptr) {
++    (void)agent;
++    (void)user_ptr;
++    if (state == JUICE_STATE_FAILED)
++        consent_failed = 1;
++}
++
++static void on_consent_gathering_done(juice_agent_t *agent, void *user_ptr) {
++    (void)agent;
++    consent_gathering_done[(intptr_t)user_ptr] = 1;
++}
++
++static bool is_stun_binding_request(const char *data, size_t size) {
++    static const unsigned char magic_cookie[4] = {0x21, 0x12, 0xA4, 0x42};
++    return size >= 20 && data[0] == 0x00 && data[1] == 0x01 &&
++           memcmp(data + 4, magic_cookie, sizeof(magic_cookie)) == 0;
++}
++
++// Plays a UDP socket whose send buffer is full whenever a consent request is due,
++// as when a bulk QUIC sender keeps the kernel buffer saturated.
++static int fail_armed_stun_requests(uintptr_t socket_handle, int socket_family,
++                                    const uint8_t *destination_address,
++                                    size_t destination_address_size, const char *data,
++                                    size_t size, int *socket_error, void *user_ptr) {
++    (void)socket_handle;
++    (void)socket_family;
++    (void)destination_address;
++    (void)destination_address_size;
++    (void)user_ptr;
++    if (stun_requests_to_fail <= 0 || !is_stun_binding_request(data, size))
++        return JUICE_UDP_SEND_NOT_HANDLED;
++
++    --stun_requests_to_fail;
++    ++stun_requests_failed;
++    *socket_error = WOULD_BLOCK_ERROR;
++    return JUICE_UDP_SEND_FAILED;
++}
++
++static juice_agent_t *create_consent_agent(intptr_t index, juice_cb_udp_send_t send_hook) {
++    juice_config_t config;
++    memset(&config, 0, sizeof(config));
++    config.concurrency_mode = JUICE_CONCURRENCY_MODE_POLL;
++    config.bind_address = "127.0.0.1";
++    config.cb_state_changed = on_consent_state_changed;
++    config.cb_gathering_done = on_consent_gathering_done;
++    config.cb_udp_send = send_hook;
++    config.user_ptr = (void *)index;
++    return juice_create(&config);
++}
++
++static bool is_connected(juice_agent_t *agent) {
++    juice_state_t state = juice_get_state(agent);
++    return state == JUICE_STATE_CONNECTED || state == JUICE_STATE_COMPLETED;
++}
++
++// RFC 7675 consent expires 30 s after the last answered check. A consent request
++// that could not even leave the host (EAGAIN) must be retried promptly: waiting a
++// full keepalive period (15 s) twice lets consent expire on a healthy path, which
++// is what failed bulk FFL migrations with "libjuice QUIC aggregate send failed: -2".
++static int test_consent_survives_full_send_buffer(void) {
++    consent_gathering_done[0] = consent_gathering_done[1] = 0;
++    consent_failed = 0;
++    stun_requests_to_fail = 0;
++    stun_requests_failed = 0;
++
++    char sdp[JUICE_MAX_SDP_STRING_LEN];
++    juice_agent_t *controlling = create_consent_agent(0, fail_armed_stun_requests);
++    juice_agent_t *controlled = create_consent_agent(1, NULL);
++    if (!controlling || !controlled)
++        goto fail;
++
++    if (juice_gather_candidates(controlling) != JUICE_ERR_SUCCESS ||
++        wait_for(&consent_gathering_done[0], 1, 2000) != 0)
++        goto fail;
++    juice_get_local_description(controlling, sdp, sizeof(sdp));
++    juice_set_remote_description(controlled, sdp);
++    if (juice_gather_candidates(controlled) != JUICE_ERR_SUCCESS ||
++        wait_for(&consent_gathering_done[1], 1, 2000) != 0)
++        goto fail;
++    juice_get_local_description(controlled, sdp, sizeof(sdp));
++    juice_set_remote_description(controlling, sdp);
++
++    for (int waited = 0; !(is_connected(controlling) && is_connected(controlled)); waited += 10) {
++        if (waited >= 5000) {
++            fprintf(stderr, "agents did not connect\n");
++            goto fail;
++        }
++        sleep_ms(10);
++    }
++
++    // The next two consent requests hit a full send buffer, then the socket drains.
++    stun_requests_to_fail = 2;
++    for (int second = 0; second < 40; ++second) {
++        sleep_ms(1000);
++        if (consent_failed || !is_connected(controlling)) {
++            fprintf(stderr, "consent expired %d s after two consent sends hit a full buffer\n",
++                    second + 1);
++            goto fail;
++        }
++    }
++    if (stun_requests_failed != 2) {
++        fprintf(stderr, "only %d consent sends were made to fail\n", stun_requests_failed);
++        goto fail;
++    }
++
++    juice_destroy(controlling);
++    juice_destroy(controlled);
++    return 0;
++fail:
++    if (controlling)
++        juice_destroy(controlling);
++    if (controlled)
++        juice_destroy(controlled);
++    return -1;
++}
++
+ int main(void) {
+     juice_set_log_level(JUICE_LOG_LEVEL_WARN);
+     const juice_concurrency_mode_t modes[] = {
+@@ -234,6 +358,11 @@ int main(void) {
+         }
+ #endif
+     }
++    printf("Running FFL consent with full send buffer test (poll, about 40 s)...\n");
++    if (test_consent_survives_full_send_buffer()) {
++        fprintf(stderr, "FFL consent with full send buffer test failed\n");
++        return 1;
++    }
+     printf("FFL extension tests passed\n");
+     return 0;
+ }
