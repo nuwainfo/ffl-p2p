@@ -1,0 +1,236 @@
+workflows:
+  ffl-p2p-macos:
+    name: ffl-p2p macOS ARM64 + x86_64
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+
+    environment:
+      xcode: 16.4
+
+    scripts:
+      - name: Prepare macOS runner
+        script: |
+          set -euo pipefail
+
+          sw_vers
+          uname -m
+          xcodebuild -version
+
+          sudo softwareupdate --install-rosetta --agree-to-license || true
+          arch -x86_64 /usr/bin/uname -m
+
+          brew install cmake git pkg-config gnutls
+
+      - name: Build and test ARM64 wheel
+        script: |
+          set -euo pipefail
+
+          ARM_CONDA="$HOME/miniconda3"
+
+          if [ ! -x "$ARM_CONDA/bin/conda" ]; then
+            curl -fsSL \
+              -o /tmp/Miniconda3-arm64.sh \
+              https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-arm64.sh
+
+            bash /tmp/Miniconda3-arm64.sh -b -p "$ARM_CONDA"
+          fi
+
+          source "$ARM_CONDA/etc/profile.d/conda.sh"
+
+          if ! conda env list | awk '{print $1}' | grep -qx ffl-p2p-arm64; then
+            conda create -y -n ffl-p2p-arm64 python=3.12
+          fi
+
+          conda activate ffl-p2p-arm64
+
+          export PYTHON="$CONDA_PREFIX/bin/python"
+          export ARCH="arm64"
+          export MACOSX_DEPLOYMENT_TARGET="15.0"
+
+          unset FFL_P2P_GNUTLS_ROOT || true
+          unset DYLD_LIBRARY_PATH || true
+          unset DYLD_FALLBACK_LIBRARY_PATH || true
+
+          rm -rf out/native-macos artifacts/macos/arm64
+          mkdir -p artifacts/macos/arm64
+
+          bash ./scripts/BuildMacOS.sh --clean
+          cp out/native-macos/wheel/*.whl artifacts/macos/arm64/
+
+          ARM_WHEEL="$(find artifacts/macos/arm64 -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "$ARM_WHEEL"
+
+          python -m pip install --force-reinstall "$ARM_WHEEL"
+
+          python - <<'PY'
+          import platform
+          import ffl_p2p
+          from ffl_p2p.Native import NativeAgent, NativeQUICCredentials
+
+          assert platform.machine() == "arm64"
+
+          credentials = NativeQUICCredentials()
+          assert "BEGIN CERTIFICATE" in credentials.certificate
+
+          agent = NativeAgent()
+          try:
+              agent.gather()
+              assert agent.localPort > 0
+              assert agent.localDescription
+          finally:
+              agent.close()
+
+          print("ARM64 native smoke test passed")
+          PY
+
+      - name: Prepare x86_64 toolchain
+        script: |
+          set -euo pipefail
+
+          X86_CONDA="$HOME/miniconda3-x86_64"
+          X86_ENV="$X86_CONDA/envs/ffl-p2p-x86_64"
+
+          if [ ! -x "$X86_CONDA/bin/conda" ]; then
+            curl -fsSL \
+              -o /tmp/Miniconda3-x86_64.sh \
+              https://repo.anaconda.com/miniconda/Miniconda3-latest-MacOSX-x86_64.sh
+
+            arch -x86_64 /bin/bash /tmp/Miniconda3-x86_64.sh \
+              -b \
+              -p "$X86_CONDA"
+          fi
+
+          if ! arch -x86_64 "$X86_CONDA/bin/conda" env list | awk '{print $1}' | grep -qx ffl-p2p-x86_64; then
+            arch -x86_64 "$X86_CONDA/bin/conda" create -y \
+              -n ffl-p2p-x86_64 \
+              -c conda-forge \
+              --override-channels \
+              python=3.12 \
+              cmake \
+              pkg-config \
+              gnutls
+          fi
+
+          arch -x86_64 "$X86_ENV/bin/python" -m pip install \
+            --disable-pip-version-check \
+            --upgrade \
+            'setuptools>=68' \
+            build \
+            delocate \
+            wheel
+
+          arch -x86_64 "$X86_ENV/bin/python" -c \
+            'import platform; assert platform.machine() == "x86_64"'
+
+      - name: Build and test x86_64 wheel
+        script: |
+          set -euo pipefail
+
+          X86_ENV="$HOME/miniconda3-x86_64/envs/ffl-p2p-x86_64"
+          X86_PYTHON="$X86_ENV/bin/python"
+
+          export PATH="$X86_ENV/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          export PYTHON="$X86_PYTHON"
+          export ARCH="x86_64"
+          export MACOSX_DEPLOYMENT_TARGET="15.0"
+          export FFL_P2P_GNUTLS_ROOT="$X86_ENV"
+
+          # Do not use DYLD_LIBRARY_PATH here; it can override Apple's
+          # system libiconv with Conda's GNU libiconv.
+          unset DYLD_LIBRARY_PATH || true
+
+          # delocate needs this to resolve Conda's @rpath dependencies.
+          export DYLD_FALLBACK_LIBRARY_PATH="$X86_ENV/lib"
+
+          rm -rf out/native-macos artifacts/macos/x86_64
+          mkdir -p artifacts/macos/x86_64
+
+          arch -x86_64 /bin/bash ./scripts/BuildMacOS.sh --clean
+          cp out/native-macos/wheel/*.whl artifacts/macos/x86_64/
+
+          X86_WHEEL="$(find artifacts/macos/x86_64 -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "$X86_WHEEL"
+
+          # GnuTLS from Conda brings both Apple's iconv users and GNU iconv.
+          # If delocate rewrites libunistring to the bundled GNU libiconv,
+          # restore libunistring's original macOS system dependency.
+          rm -rf /tmp/ffl-p2p-x86-wheel
+          mkdir -p /tmp/ffl-p2p-x86-wheel
+          unzip -q "$X86_WHEEL" -d /tmp/ffl-p2p-x86-wheel
+
+          DYLIB_DIR="/tmp/ffl-p2p-x86-wheel/ffl_p2p/.dylibs"
+          WHEEL_UNISTRING="$(find "$DYLIB_DIR" -maxdepth 1 -name 'libunistring*.dylib' -print -quit 2>/dev/null || true)"
+
+          if [ -n "$WHEEL_UNISTRING" ]; then
+            ICONV_DEP="$(
+              otool -L "$WHEEL_UNISTRING" |
+                awk '/libiconv\.2\.dylib/ { print $1; exit }'
+            )"
+
+            if [ -n "$ICONV_DEP" ] && [ "$ICONV_DEP" != "/usr/lib/libiconv.2.dylib" ]; then
+              install_name_tool \
+                -change "$ICONV_DEP" \
+                "/usr/lib/libiconv.2.dylib" \
+                "$WHEEL_UNISTRING"
+
+              codesign --force --sign - "$WHEEL_UNISTRING"
+
+              rm -rf /tmp/ffl-p2p-x86-packed
+              mkdir -p /tmp/ffl-p2p-x86-packed
+
+              arch -x86_64 "$X86_PYTHON" -m wheel pack \
+                /tmp/ffl-p2p-x86-wheel \
+                -d /tmp/ffl-p2p-x86-packed
+
+              rm -f artifacts/macos/x86_64/*.whl
+              cp /tmp/ffl-p2p-x86-packed/*.whl artifacts/macos/x86_64/
+            fi
+          fi
+
+          X86_WHEEL="$(find artifacts/macos/x86_64 -maxdepth 1 -name '*.whl' -print -quit)"
+          test -n "$X86_WHEEL"
+
+          # The final wheel must run without the build-time Conda library path.
+          unset DYLD_LIBRARY_PATH || true
+          unset DYLD_FALLBACK_LIBRARY_PATH || true
+          unset FFL_P2P_GNUTLS_ROOT || true
+
+          arch -x86_64 "$X86_PYTHON" -m pip install \
+            --force-reinstall \
+            "$X86_WHEEL"
+
+          arch -x86_64 "$X86_PYTHON" - <<'PY'
+          import platform
+          import ffl_p2p
+          from ffl_p2p.Native import NativeAgent, NativeQUICCredentials
+
+          assert platform.machine() == "x86_64"
+
+          credentials = NativeQUICCredentials()
+          assert "BEGIN CERTIFICATE" in credentials.certificate
+
+          agent = NativeAgent()
+          try:
+              agent.gather()
+              assert agent.localPort > 0
+              assert agent.localDescription
+          finally:
+              agent.close()
+
+          print("x86_64 native smoke test passed")
+          PY
+
+      - name: Wheel summary
+        script: |
+          set -euo pipefail
+
+          find artifacts/macos -type f -name '*.whl' \
+            -print \
+            -exec shasum -a 256 {} \;
+
+          test "$(find artifacts/macos/arm64 -type f -name '*.whl' | wc -l | tr -d ' ')" = "1"
+          test "$(find artifacts/macos/x86_64 -type f -name '*.whl' | wc -l | tr -d ' ')" = "1"
+
+    artifacts:
+      - artifacts/macos/arm64/*.whl
+      - artifacts/macos/x86_64/*.whl
