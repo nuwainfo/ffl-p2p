@@ -22,6 +22,7 @@ import time
 import uuid
 
 from typing import Optional
+from urllib.parse import urlsplit
 
 from .Connection import Connection
 from .Native import NativeQUICCredentials, NativeUnavailableError
@@ -38,12 +39,15 @@ class P2PConnectivityTimeout(TimeoutError):
 class P2PPublisher:
     def __init__(self, httpPort: int, configuration: Optional[ICEConfiguration] = None,
                  useUDPPortMapping: bool = True, useTCPPortMapping: bool = True,
-                 tcpLocalHosts=None, tcpPath: str = '', udpHandler=None):
+                 tcpLocalHosts=None, tcpPath: str = '', udpHandler=None,
+                 tcpCertificateFingerprint: Optional[str] = None):
         self.sessionId = uuid.uuid4().hex
         self.configuration = configuration or ICEConfiguration()
+        self.tcpCertificateFingerprint = tcpCertificateFingerprint
         self._udp = UDPConnector(self.configuration, usePortMapping=useUDPPortMapping)
         self._tcp = TCPPublisher(
-            httpPort, usePortMapping=useTCPPortMapping, localHosts=tcpLocalHosts, path=tcpPath
+            httpPort, usePortMapping=useTCPPortMapping, localHosts=tcpLocalHosts, path=tcpPath,
+            useTLS=tcpCertificateFingerprint is not None,
         )
         self._offer = None
         self._answerAccepted = threading.Event()
@@ -64,6 +68,7 @@ class P2PPublisher:
                 udpDescription=self._udp.gather(),
                 tcpEndpoints=self._tcp.endpoints(),
                 quicCertificate=(self._quicCredentials.certificate if self._quicCredentials else None),
+                tcpCertificateFingerprint=self.tcpCertificateFingerprint,
             )
             
         return self._offer
@@ -140,9 +145,12 @@ class P2PConnector:
             signaling.sendAnswer(P2PAnswer(offer.sessionId, localDescription))
 
             if preference != 'udp':
-                tcpTransport = TCPConnector(offer.tcpEndpoints).connect(
-                    min(connectivityTimeout, 0.75), headers=headers
-                )
+                # Headers that authorize HTTPS signaling must not be downgraded to a plaintext probe.
+                tcpTransport = TCPConnector(
+                    offer.tcpEndpoints,
+                    certificateFingerprint=offer.tcpCertificateFingerprint,
+                    requireTLS=urlsplit(baseURL).scheme == 'https',
+                ).connect(min(connectivityTimeout, 0.75), headers=headers)
                 
                 if tcpTransport:
                     return Connection(tcpTransport, connectTime=time.monotonic() - startedAt)

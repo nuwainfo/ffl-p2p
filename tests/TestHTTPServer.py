@@ -17,20 +17,74 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+import hashlib
 import json
+import socket
+import ssl
 import threading
 
 from ffl_p2p.Signaling import P2PAnswer
 
 
+class TLSTestIdentity:
+    """A static self-signed identity for pinned direct TLS tests; peers pin
+    its fingerprint and never trust it as a CA."""
+
+    PATH = Path(__file__).with_name('TLSTestIdentity.pem')
+    CERTIFICATE_END = '-----END CERTIFICATE-----'
+
+    @classmethod
+    def fingerprint(cls) -> str:
+        identityPEM = cls.PATH.read_text(encoding='ascii')
+        certificatePEM = identityPEM[:identityPEM.index(cls.CERTIFICATE_END) + len(cls.CERTIFICATE_END)]
+        return hashlib.sha256(ssl.PEM_cert_to_DER_cert(certificatePEM)).hexdigest()
+
+    @classmethod
+    def createServerContext(cls) -> ssl.SSLContext:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cls.PATH)
+        return context
+
+
+@dataclass(frozen=True)
+class RecordedRequest:
+    method: str
+    path: str
+    secure: bool
+
+
+class DualProtocolHTTPServer(ThreadingHTTPServer):
+    """Serve TLS and plain HTTP on one port, as FFL shares do: a connection
+    is TLS when its first byte opens a TLS handshake record."""
+
+    TLS_HANDSHAKE_RECORD = b'\x16'
+
+    def __init__(self, serverAddress, handlerClass, tlsContext=None):
+        super().__init__(serverAddress, handlerClass)
+        self.tlsContext = tlsContext
+
+    def finish_request(self, request, client_address):
+        if self.tlsContext is None or request.recv(1, socket.MSG_PEEK) != self.TLS_HANDSHAKE_RECORD:
+            super().finish_request(request, client_address)
+            return
+
+        with self.tlsContext.wrap_socket(request, server_side=True) as tlsRequest:
+            super().finish_request(tlsRequest, client_address)
+
+
 class P2PTestHTTPServer:
-    def __init__(self, payload: bytes):
+    def __init__(self, payload: bytes, tls: bool = False):
         self.publisher = None
         self.payload = payload
+        self.requests = []
 
-        self.server = ThreadingHTTPServer(('127.0.0.1', 0), self._createHandler())
+        self.server = DualProtocolHTTPServer(
+            ('127.0.0.1', 0), self._createHandler(),
+            tlsContext=TLSTestIdentity.createServerContext() if tls else None,
+        )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
     @property
@@ -47,6 +101,7 @@ class P2PTestHTTPServer:
         class Handler(BaseHTTPRequestHandler):
             # BaseHTTPRequestHandler requires these snake_case hook names.
             def do_GET(self):
+                self._record()
                 if self.path == '/p2p/offer':
                     self._writeJSON(asdict(owner.publisher.createOffer()))
                     return
@@ -65,6 +120,7 @@ class P2PTestHTTPServer:
                 self.send_error(404)
 
             def do_POST(self):
+                self._record()
                 if self.path != '/p2p/answer':
                     self.send_error(404)
                     return
@@ -72,6 +128,11 @@ class P2PTestHTTPServer:
                 answer = P2PAnswer.fromDict(json.loads(self.rfile.read(size).decode('utf-8')))
                 owner.publisher.acceptAnswer(answer)
                 self._writeJSON({'accepted': True})
+
+            def _record(self):
+                owner.requests.append(RecordedRequest(
+                    self.command, self.path, isinstance(self.connection, ssl.SSLSocket)
+                ))
 
             def _writeJSON(self, data):
                 body = json.dumps(data).encode('utf-8')

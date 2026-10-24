@@ -7,10 +7,20 @@ import unittest
 import urllib.error
 from unittest.mock import patch
 
-from ffl_p2p.Signaling import HTTPSignalingClient, P2PAnswer, P2PSignalingError
+from ffl_p2p.Signaling import HTTPSignalingClient, P2PAnswer, P2POffer, P2PSignalingError
 
 
 class SignalingTest(unittest.TestCase):
+    def testOfferIgnoresFieldsFromANewerPublisher(self):
+        offer = P2POffer.fromDict({
+            'sessionId': 'session',
+            'udpDescription': 'sdp',
+            'tcpEndpoints': [],
+            'fieldFromANewerPublisher': True,
+        })
+
+        self.assertEqual('session', offer.sessionId)
+
     def testOfferHTTPErrorIncludesSignalingStage(self):
         error = urllib.error.HTTPError(
             'https://example.invalid/p2p/offer',

@@ -26,13 +26,16 @@ from ffl_p2p import ICEConfiguration
 from ffl_p2p.P2P import P2PConnectivityTimeout, P2PConnector, P2PPublisher
 from ffl_p2p.Signaling import P2POffer
 
-from TestHTTPServer import P2PTestHTTPServer
+from TestHTTPServer import P2PTestHTTPServer, TLSTestIdentity
 
 
 class P2PTest(unittest.TestCase):
-    def _createServer(self, payload):
-        server = P2PTestHTTPServer(payload)
-        publisher = P2PPublisher(server.port, useUDPPortMapping=True, useTCPPortMapping=False, tcpLocalHosts=['127.0.0.1'])
+    def _createServer(self, payload, tls=False):
+        server = P2PTestHTTPServer(payload, tls=tls)
+        publisher = P2PPublisher(
+            server.port, useUDPPortMapping=True, useTCPPortMapping=False, tcpLocalHosts=['127.0.0.1'],
+            tcpCertificateFingerprint=TLSTestIdentity.fingerprint() if tls else None,
+        )
 
         server.setPublisher(publisher)
         server.start()
@@ -149,6 +152,70 @@ class P2PTest(unittest.TestCase):
         finally:
             server.close()
             publisher.close()
+
+    def testHTTPBootstrapThenPinnedTLSDirectTransfer(self):
+        payload = b'FFL HTTP bootstrap -> pinned TLS direct TCP -> existing HTTP server'
+        publisher, server = self._createServer(payload, tls=True)
+
+        try:
+            connection = P2PConnector(useUDPPortMapping=True).connect(server.baseURL, preference='tcp')
+            self.assertIsNotNone(connection)
+            self.assertTrue(connection.transport.baseURL.startswith('https://'), connection.transport.baseURL)
+            self.assertEqual(TLSTestIdentity.fingerprint(), connection.transport.certificateFingerprint)
+
+            self.assertEqual(payload, connection.transport.read('/file'))
+            connection.close()
+        finally:
+            server.close()
+            publisher.close()
+
+        signalingPaths = {'/p2p/offer', '/p2p/answer'}
+        directRequests = [request for request in server.requests if request.path not in signalingPaths]
+        self.assertTrue(directRequests)
+        self.assertTrue(all(request.secure for request in directRequests), directRequests)
+
+    def testHTTPSSignalingNeverProbesAPlaintextTCPEndpoint(self):
+        # The headers that authorize signaling over HTTPS must not then cross
+        # the network in plaintext to a direct endpoint (e.g. an older publisher).
+        publisher, server = self._createServer(b'unused')
+        plaintextOffer = publisher.createOffer()
+
+        class HTTPSRelaySignaling:
+            def __init__(self, baseURL, headers=None):
+                return
+
+            def getOffer(self):
+                return plaintextOffer
+
+            def sendAnswer(self, answer):
+                return
+
+        class LocalUDPConnector:
+            def __init__(self, configuration, usePortMapping=True):
+                return
+
+            def setRemoteDescription(self, sdp):
+                return
+
+            def gather(self):
+                return 'answer-sdp'
+
+            def close(self):
+                return
+
+        try:
+            with patch('ffl_p2p.P2P.HTTPSignalingClient', HTTPSRelaySignaling), \
+                 patch('ffl_p2p.P2P.UDPConnector', LocalUDPConnector):
+                connection = P2PConnector(useUDPPortMapping=False).connect(
+                    'https://relay.example.invalid/share-id', preference='tcp',
+                    headers={'X-FFL-Pickup': '123456'},
+                )
+        finally:
+            server.close()
+            publisher.close()
+
+        self.assertIsNone(connection)
+        self.assertEqual([], server.requests)
 
     def testHTTPBootstrapThenUDPDirect(self):
         payload = b'unused'

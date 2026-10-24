@@ -17,7 +17,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__version__ = "0.2.10"
+__version__ = "0.2.11"
 
 from .Configuration import ICEConfiguration, ICEServer
 from .Connection import Connection
@@ -25,7 +25,7 @@ from .P2P import P2PConnectivityTimeout, P2PConnector, P2PDownloadMixin, P2PPubl
 from .QUIC import QUICFileClient, QUICFileServer, QUICStream, QUICUnavailableError
 from .Signaling import HTTPSignalingClient, P2PAnswer, P2POffer, P2PSignalingError
 from .TCP import TCPConnector, TCPPublisher
-from .Transport import HTTPTransport, Transport, UDPTransport
+from .Transport import HTTPTransport, TLSCertificateMismatchError, Transport, UDPTransport
 from .UDP import UDPConnector
 from .Native import setLogLevel, setNativeLoggingLevel
 
@@ -48,6 +48,7 @@ __all__ = [
     'QUICUnavailableError',
     'TCPConnector',
     'TCPPublisher',
+    'TLSCertificateMismatchError',
     'Transport',
     'UDPConnector',
     'UDPTransport',

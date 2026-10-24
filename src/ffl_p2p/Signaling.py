@@ -18,7 +18,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from typing import Optional
 
 import json
@@ -30,26 +30,27 @@ class P2PSignalingError(RuntimeError):
     pass
 
 
+class SignalingMessage:
+    @classmethod
+    def fromDict(cls, data):
+        # Fields a newer peer adds are ignored, so messages stay readable across versions.
+        return cls(**{field.name: data[field.name] for field in fields(cls) if field.name in data})
+
+
 @dataclass(frozen=True)
-class P2POffer:
+class P2POffer(SignalingMessage):
     sessionId: str
     udpDescription: str
     tcpEndpoints: list[str]
     quicCertificate: Optional[str] = None
-
-    @classmethod
-    def fromDict(cls, data):
-        return cls(**data)
+    # SHA-256 (hex) of the DER certificate that https tcpEndpoints present.
+    tcpCertificateFingerprint: Optional[str] = None
 
 
 @dataclass(frozen=True)
-class P2PAnswer:
+class P2PAnswer(SignalingMessage):
     sessionId: str
     udpDescription: str
-
-    @classmethod
-    def fromDict(cls, data):
-        return cls(**data)
 
 
 class SignalingClient(ABC):
