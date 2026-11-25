@@ -60,6 +60,7 @@ void destroyFFLP2PJuice(FFLP2PJuice *juice);
 int gatherFFLP2PJuice(FFLP2PJuice *juice);
 int holdFFLP2PJuiceGathering(FFLP2PJuice *juice);
 int releaseFFLP2PJuiceGathering(FFLP2PJuice *juice);
+int finishFFLP2PJuiceGathering(FFLP2PJuice *juice);
 int getFFLP2PJuiceLocalPort(FFLP2PJuice *juice, uint16_t *port);
 int addFFLP2PJuiceMappedCandidate(
     FFLP2PJuice *juice,

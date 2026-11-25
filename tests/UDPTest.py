@@ -20,6 +20,7 @@
 import socket
 import struct
 import threading
+import time
 import unittest
 
 from unittest.mock import patch
@@ -74,7 +75,74 @@ class FakeSTUNServer:
         self._thread.join(timeout=1)
 
 
+class SilentSTUNServer:
+    """Accepts STUN requests and never answers, like an unroutable IPv6 STUN address."""
+
+    def __init__(self):
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._socket.bind(('127.0.0.1', 0))
+        self.port = self._socket.getsockname()[1]
+
+    def close(self):
+        self._socket.close()
+
+
 class UDPTest(unittest.TestCase):
+    def testUnansweredSTUNFinishesGatheringWithHostCandidates(self):
+        silentServer = SilentSTUNServer()
+        offerer = UDPConnector(
+            ICEConfiguration(
+                iceServers=[ICEServer(urls=f'stun:127.0.0.1:{silentServer.port}')],
+                gatheringTimeout=0.5,
+            ),
+            usePortMapping=False,
+        )
+        answerer = UDPConnector(usePortMapping=False)
+
+        try:
+            startedAt = time.monotonic()
+            offerSDP = offerer.gather()
+            # libjuice alone would keep the unanswered STUN entry pending for ~23 s.
+            self.assertLess(time.monotonic() - startedAt, 3.0)
+            self.assertIn('typ host', offerSDP)
+            self.assertIn('a=end-of-candidates', offerSDP)
+
+            answerer.setRemoteDescription(offerSDP)
+            offerer.setRemoteDescription(answerer.gather())
+
+            self.assertIsNotNone(offerer.connect(timeout=2.0))
+            self.assertIsNotNone(answerer.connect(timeout=2.0))
+
+            offerer.agent.send(b'partial-gathering')
+            self.assertEqual(b'partial-gathering', answerer.agent.waitForEvent('receive', 2)['value'])
+        finally:
+            offerer.close()
+            answerer.close()
+            silentServer.close()
+
+    def testGatheringTimeoutKeepsSTUNCandidatesAlreadyGathered(self):
+        # "localhost" usually resolves to both ::1 and 127.0.0.1. Only the IPv4
+        # address answers, so the IPv6 STUN entry stays pending as on a host with
+        # broken IPv6; the IPv4 srflx candidate must survive the soft timeout.
+        server = FakeSTUNServer('203.0.113.41', 45641)
+        connector = UDPConnector(
+            ICEConfiguration(
+                iceServers=[ICEServer(urls=f'stun:localhost:{server.port}')],
+                gatheringTimeout=0.75,
+            ),
+            usePortMapping=False,
+        )
+
+        try:
+            sdp = connector.gather()
+            self.assertGreater(server.requestCount, 0)
+            self.assertIn('203.0.113.41', sdp)
+            self.assertIn('typ srflx', sdp)
+            self.assertIn('a=end-of-candidates', sdp)
+        finally:
+            connector.close()
+            server.close()
+
     def testOfferAnswerRolesExchangeDatagrams(self):
         offerer = UDPConnector(usePortMapping=False)
         answerer = UDPConnector(usePortMapping=False)

@@ -277,6 +277,9 @@ class NativeAgent:
     def releaseGathering(self):
         self._agent.releaseGathering()
 
+    def finishGathering(self):
+        self._agent.finishGathering()
+
     @property
     def localPort(self) -> int:
         return self._agent.localPort()

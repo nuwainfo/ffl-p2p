@@ -658,6 +658,7 @@ static PyObject *name(PyP2PAgent *self, PyObject *Py_UNUSED(ignored)) { \
 SIMPLE_AGENT_METHOD(gatherAgent, gatherFFLP2PJuice, "gather")
 SIMPLE_AGENT_METHOD(holdAgentGathering, holdFFLP2PJuiceGathering, "holdGathering")
 SIMPLE_AGENT_METHOD(releaseAgentGathering, releaseFFLP2PJuiceGathering, "releaseGathering")
+SIMPLE_AGENT_METHOD(finishAgentGathering, finishFFLP2PJuiceGathering, "finishGathering")
 SIMPLE_AGENT_METHOD(completeAgentRemoteGathering, completeFFLP2PJuiceRemoteGathering, "remoteGatheringDone")
 
 static PyObject *getAgentLocalPort(PyP2PAgent *self, PyObject *Py_UNUSED(ignored)) {
@@ -1047,6 +1048,7 @@ static PyMethodDef agentMethods[] = {
     {"gather", (PyCFunction)gatherAgent, METH_NOARGS, NULL},
     {"holdGathering", (PyCFunction)holdAgentGathering, METH_NOARGS, NULL},
     {"releaseGathering", (PyCFunction)releaseAgentGathering, METH_NOARGS, NULL},
+    {"finishGathering", (PyCFunction)finishAgentGathering, METH_NOARGS, NULL},
     {"localPort", (PyCFunction)getAgentLocalPort, METH_NOARGS, NULL},
     {"localDescription", (PyCFunction)getAgentLocalDescription, METH_NOARGS, NULL},
     {"setRemoteDescription", (PyCFunction)setAgentRemoteDescription, METH_O, NULL},
@@ -1291,7 +1293,7 @@ PyMODINIT_FUNC PyInit__ffl_p2p(void) {
     PyModule_AddIntConstant(module, "JUICE_STATE_COMPLETED", JUICE_STATE_COMPLETED);
     PyModule_AddIntConstant(module, "JUICE_STATE_FAILED", JUICE_STATE_FAILED);
     PyModule_AddStringConstant(module, "FFL_P2P_NATIVE_BUILD",
-                               "0.2.11");
+                               "0.2.12");
 #ifdef FFL_P2P_FAKE_PLUM
     PyModule_AddIntConstant(module, "FFL_P2P_FAKE_PLUM", 1);
 #endif

@@ -40,7 +40,8 @@ class SignalingMessage:
 @dataclass(frozen=True)
 class P2POffer(SignalingMessage):
     sessionId: str
-    udpDescription: str
+    # None when the publisher could not set up direct UDP; tcpEndpoints remain usable.
+    udpDescription: Optional[str]
     tcpEndpoints: list[str]
     quicCertificate: Optional[str] = None
     # SHA-256 (hex) of the DER certificate that https tcpEndpoints present.

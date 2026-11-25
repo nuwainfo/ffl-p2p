@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 
 
 class UDPConnector:
+    # Failures that make direct UDP unusable for one session: no local candidates
+    # (TimeoutError) or a libjuice/native error (RuntimeError, which includes
+    # NativeUnavailableError).
+    SETUP_ERRORS = (TimeoutError, RuntimeError)
+
     def __init__(self, configuration: Optional[ICEConfiguration] = None, usePortMapping: bool = True):
         self.configuration = configuration or ICEConfiguration()
         self.usePortMapping = usePortMapping
@@ -86,11 +91,28 @@ class UDPConnector:
                 self._agent.releaseGathering()
 
         if self._agent.waitForEvent('gatheringDone', self.configuration.gatheringTimeout) is None:
-            raise TimeoutError('libjuice candidate gathering timed out')
-            
+            # gatheringTimeout is a soft deadline. A STUN address that never answers
+            # (typically IPv6 without a working route) keeps libjuice pending for ~23 s,
+            # yet the host, mapped and other srflx candidates are already usable.  The
+            # offer/answer exchange is non-trickle, so close gathering natively: the SDP
+            # then carries end-of-candidates and matches libjuice's own state.
+            self._agent.finishGathering()
+            logger.warning(
+                'ICE candidate gathering timed out after %.2fs; continuing with the candidates gathered so far',
+                self.configuration.gatheringTimeout,
+            )
+
+        description = self._agent.localDescription
+        if not self._hasCandidates(description):
+            raise TimeoutError('libjuice candidate gathering produced no local candidates')
+
         self._gathered = True
-        
-        return self._agent.localDescription
+
+        return description
+
+    @staticmethod
+    def _hasCandidates(description: str) -> bool:
+        return any(line.startswith('a=candidate:') for line in description.splitlines())
 
     def _tryPortMapping(self):
         try:
@@ -141,7 +163,7 @@ class UDPConnector:
 
     def connect(self, timeout: Optional[float] = None) -> Optional[UDPTransport]:
         if not self._gathered:
-            raise RuntimeError('local candidate gathering is not complete')
+            raise RuntimeError('local description has not been gathered')
             
         if not self._remoteDescriptionSet:
             raise RuntimeError('remote description is not set')

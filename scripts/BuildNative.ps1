@@ -173,7 +173,17 @@ $wheelDirectory = Join-Path $outDirectory "wheel"
 $wheelExtractDirectory = Join-Path $outDirectory "wheel-extract"
 New-Item -ItemType Directory -Force -Path $wheelDirectory | Out-Null
 
-& python -c "import build"
+# Like BuildLinux.sh/BuildMacOS.sh, never let setuptools reuse a previous run's
+# staging tree. The root build\ directory is also importable as a namespace
+# package named "build", which made "import build" succeed even when the PyPA
+# build package was missing; probing build.__main__ checks the real package.
+foreach ($staleDirectory in @((Join-Path $root "build"), (Join-Path $root "src\ffl_p2p.egg-info"))) {
+    if (Test-Path $staleDirectory) {
+        Remove-Item -LiteralPath $staleDirectory -Recurse -Force
+    }
+}
+
+& python -c "import build.__main__"
 if ($LASTEXITCODE -ne 0) {
     & python -m pip install --disable-pip-version-check build
     if ($LASTEXITCODE -ne 0) {

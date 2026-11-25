@@ -23,18 +23,22 @@ import unittest
 from unittest.mock import patch
 
 from ffl_p2p import ICEConfiguration
-from ffl_p2p.P2P import P2PConnectivityTimeout, P2PConnector, P2PPublisher
+from ffl_p2p.P2P import P2PConnectivityTimeout, P2PConnector, P2PPublisher, P2PUDPUnavailableError
 from ffl_p2p.Signaling import P2POffer
 
 from TestHTTPServer import P2PTestHTTPServer, TLSTestIdentity
 
 
 class P2PTest(unittest.TestCase):
-    def _createServer(self, payload, tls=False):
+    # RFC 5737 TEST-NET-1 is never assigned to a local interface, so libjuice
+    # really fails to open its UDP socket: direct UDP is unavailable.
+    UDP_UNAVAILABLE_CONFIGURATION = ICEConfiguration(bindAddress='192.0.2.1')
+
+    def _createServer(self, payload, tls=False, configuration=None, tcpLocalHosts=('127.0.0.1',)):
         server = P2PTestHTTPServer(payload, tls=tls)
         publisher = P2PPublisher(
-            server.port, useUDPPortMapping=True, useTCPPortMapping=False, tcpLocalHosts=['127.0.0.1'],
-            tcpCertificateFingerprint=TLSTestIdentity.fingerprint() if tls else None,
+            server.port, configuration=configuration, useUDPPortMapping=True, useTCPPortMapping=False,
+            tcpLocalHosts=tcpLocalHosts, tcpCertificateFingerprint=TLSTestIdentity.fingerprint() if tls else None,
         )
 
         server.setPublisher(publisher)
@@ -216,6 +220,78 @@ class P2PTest(unittest.TestCase):
 
         self.assertIsNone(connection)
         self.assertEqual([], server.requests)
+
+    def _assertDirectTCPTransfer(self, connector, server, payload, preference='auto'):
+        connection = connector.connect(server.baseURL, preference=preference)
+        self.assertIsNotNone(connection, 'direct TCP must be selected when UDP is unavailable')
+        self.assertEqual('tcp', connection.transportName)
+        self.assertEqual(payload, connection.transport.read('/file'))
+        connection.close()
+
+    def _assertNoAnswerPosted(self, server):
+        self.assertNotIn(
+            '/p2p/answer', [request.path for request in server.requests],
+            'an answer must only be posted when UDP is negotiated',
+        )
+
+    def testPublisherUDPFailureStillOffersDirectTCP(self):
+        """Regression: a publisher whose UDP gathering failed returned no offer
+        at all (HTTP 500), so the downloader could not use direct TCP either."""
+        payload = b'publisher UDP failed -> TCP endpoints still offered'
+        publisher, server = self._createServer(payload, configuration=self.UDP_UNAVAILABLE_CONFIGURATION)
+
+        try:
+            self._assertDirectTCPTransfer(P2PConnector(useUDPPortMapping=False), server, payload)
+            self.assertIsNone(publisher.createOffer().udpDescription)
+            self.assertIsNone(publisher.waitForUDP(5), 'a publisher without UDP has no UDP transport to wait for')
+
+            # Setup failures must not look like ICE connectivity timeouts, which
+            # tell applications to skip their other ICE-based fallbacks.
+            with self.assertRaisesRegex(P2PUDPUnavailableError, 'no direct UDP transport'):
+                P2PConnector(useUDPPortMapping=False).connect(server.baseURL, preference='udp')
+        finally:
+            server.close()
+            publisher.close()
+
+        self._assertNoAnswerPosted(server)
+
+    def testConnectorUDPFailureStillTriesDirectTCP(self):
+        payload = b'connector UDP failed -> direct TCP'
+        publisher, server = self._createServer(payload)
+
+        try:
+            self._assertDirectTCPTransfer(
+                P2PConnector(self.UDP_UNAVAILABLE_CONFIGURATION, useUDPPortMapping=False), server, payload
+            )
+        finally:
+            server.close()
+            publisher.close()
+
+        self._assertNoAnswerPosted(server)
+
+    def testTCPPreferenceDoesNotNegotiateUDP(self):
+        payload = b'tcp preference never touches UDP'
+        publisher, server = self._createServer(payload)
+
+        try:
+            self._assertDirectTCPTransfer(P2PConnector(useUDPPortMapping=False), server, payload, preference='tcp')
+        finally:
+            server.close()
+            publisher.close()
+
+        self._assertNoAnswerPosted(server)
+
+    def testNoDirectPathReportsUDPUnavailable(self):
+        publisher, server = self._createServer(
+            b'unused', configuration=self.UDP_UNAVAILABLE_CONFIGURATION, tcpLocalHosts=[]
+        )
+
+        try:
+            with self.assertRaisesRegex(P2PUDPUnavailableError, 'no direct UDP transport'):
+                P2PConnector(useUDPPortMapping=False).connect(server.baseURL, preference='auto')
+        finally:
+            server.close()
+            publisher.close()
 
     def testHTTPBootstrapThenUDPDirect(self):
         payload = b'unused'

@@ -140,6 +140,10 @@ int releaseFFLP2PJuiceGathering(FFLP2PJuice *juice) {
     return juice && juice->agent ? juice_release_gathering(juice->agent) : JUICE_ERR_INVALID;
 }
 
+int finishFFLP2PJuiceGathering(FFLP2PJuice *juice) {
+    return juice && juice->agent ? juice_finish_gathering(juice->agent) : JUICE_ERR_INVALID;
+}
+
 int getFFLP2PJuiceLocalPort(FFLP2PJuice *juice, uint16_t *port) {
     return juice && juice->agent ? juice_get_local_port(juice->agent, port) : JUICE_ERR_INVALID;
 }

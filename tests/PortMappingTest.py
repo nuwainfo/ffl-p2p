@@ -10,10 +10,13 @@ from ffl_p2p.TCP import TCPPublisher
 from ffl_p2p.UDP import UDPConnector
 
 
+LOCAL_SDP = 'a=ice-ufrag:fake\r\na=candidate:1 1 UDP 2122317823 192.0.2.10 40000 typ host\r\n'
+
+
 class FakeAgent:
     def __init__(self):
         self.localPort = 40000
-        self.localDescription = 'local-sdp'
+        self.localDescription = LOCAL_SDP
         self.releaseCount = 0
         self.addMappedCandidate = Mock()
 
@@ -39,7 +42,7 @@ class PortMappingTest(unittest.TestCase):
              patch('ffl_p2p.UDP.NativePortMapping', mappingFactory):
             description = connector.gather()
 
-        self.assertEqual('local-sdp', description)
+        self.assertEqual(LOCAL_SDP, description)
         self.assertEqual(1, agent.releaseCount)
         return agent
 
@@ -76,7 +79,7 @@ class PortMappingTest(unittest.TestCase):
 
         with patch('ffl_p2p.UDP.NativeAgent', return_value=agent), \
              patch('ffl_p2p.UDP.NativePortMapping', return_value=mapping):
-            self.assertEqual('local-sdp', connector.gather())
+            self.assertEqual(LOCAL_SDP, connector.gather())
 
         self.assertEqual(1, agent.releaseCount)
         mapping.close.assert_called_once_with()
@@ -96,7 +99,7 @@ class PortMappingTest(unittest.TestCase):
 
         with patch('ffl_p2p.UDP.NativeAgent', return_value=agent), \
              patch('ffl_p2p.UDP.NativePortMapping', return_value=mapping):
-            self.assertEqual('local-sdp', connector.gather())
+            self.assertEqual(LOCAL_SDP, connector.gather())
 
         self.assertEqual(1, agent.releaseCount)
         mapping.close.assert_called_once_with()

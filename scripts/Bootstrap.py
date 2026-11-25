@@ -120,6 +120,7 @@ class Bootstrapper:
     LIBJUICE_AGGREGATE_BACKPRESSURE_PATCH_SHA256 = 'bc9af7f51fc8c782e9a09112f49ffc3874c6a1cfcf376414187383465eaaa9f1'
     LIBJUICE_DATAPATH_SEND_HOOK_PATCH_SHA256 = '2d6c4b1e691be6dad315261b6578976d208dc13a4e8898ac866aa0ab1f9426d2'
     LIBJUICE_CONSENT_SEND_RETRY_PATCH_SHA256 = '637f1f1883d052655d4db5e92749a359e607c231d6434b64d616615cd7f0d5c2'
+    LIBJUICE_FINISH_GATHERING_PATCH_SHA256 = '2d40472dc11c5d665128259e5fbde1bc5af3b1ea7a4b89af9631636372b87453'
     LIBPLUM_LOG_LEVEL_PATCH_SHA256 = (
         'a7e76fba63b4c1660aa2be2f3a1fa6c'
         'd0d189b3c95825bb01859d63ff3e9cc23'
@@ -183,6 +184,11 @@ class Bootstrapper:
                 self.thirdparty / 'libjuice',
                 root / 'patches' / 'libjuice' / '0007-ConsentSendRetry.patch',
                 self.LIBJUICE_CONSENT_SEND_RETRY_PATCH_SHA256,
+            ),
+            DependencyPatch(
+                self.thirdparty / 'libjuice',
+                root / 'patches' / 'libjuice' / '0008-FinishGathering.patch',
+                self.LIBJUICE_FINISH_GATHERING_PATCH_SHA256,
             ),
         ]
         self.libplumPatches = [

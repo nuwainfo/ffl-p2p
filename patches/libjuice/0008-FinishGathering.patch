@@ -1,0 +1,191 @@
+diff --git a/include/juice/juice.h b/include/juice/juice.h
+index 125a641..05b9e1f 100644
+--- a/include/juice/juice.h
++++ b/include/juice/juice.h
+@@ -186,6 +186,11 @@ JUICE_EXPORT int juice_gather_candidates(juice_agent_t *agent);
+ // Holds may be nested and should normally be acquired before gathering starts.
+ JUICE_EXPORT int juice_hold_gathering(juice_agent_t *agent);
+ JUICE_EXPORT int juice_release_gathering(juice_agent_t *agent);
++// Complete gathering now with the candidates gathered so far. Pending STUN/TURN server
++// transactions are abandoned (marked failed) so the local description can be signaled
++// without trickle ICE. The agent and its socket remain usable for connectivity checks.
++// Fails with JUICE_ERR_FAILED while gathering is held. Calling it after completion succeeds.
++JUICE_EXPORT int juice_finish_gathering(juice_agent_t *agent);
+ // Return the UDP port bound by the ICE agent after gathering has started.
+ JUICE_EXPORT int juice_get_local_port(juice_agent_t *agent, uint16_t *port);
+ // Inject an externally-created UDP mapping (PCP/NAT-PMP/UPnP) as a srflx candidate.
+diff --git a/src/agent.c b/src/agent.c
+index 48fd939..fc7ad0c 100644
+--- a/src/agent.c
++++ b/src/agent.c
+@@ -374,6 +374,35 @@ int agent_release_gathering(juice_agent_t *agent) {
+ 	return JUICE_ERR_SUCCESS;
+ }
+ 
++int agent_finish_gathering(juice_agent_t *agent) {
++	if (!agent->conn_impl)
++		return JUICE_ERR_NOT_AVAIL;
++
++	conn_lock(agent);
++	if (agent->gathering_done) {
++		conn_unlock(agent);
++		return JUICE_ERR_SUCCESS;
++	}
++	if (agent->gathering_holds > 0) {
++		conn_unlock(agent);
++		return JUICE_ERR_FAILED;
++	}
++	for (int i = 0; i < agent->entries_count; ++i) {
++		agent_stun_entry_t *entry = agent->entries + i;
++		if ((entry->type == AGENT_STUN_ENTRY_TYPE_SERVER ||
++		     entry->type == AGENT_STUN_ENTRY_TYPE_RELAY) &&
++		    entry->state == AGENT_STUN_ENTRY_STATE_PENDING) {
++			JLOG_INFO("Abandoning pending STUN server or relay entry %d to finish gathering", i);
++			entry->state = AGENT_STUN_ENTRY_STATE_FAILED;
++			entry->next_transmission = 0;
++		}
++	}
++	agent_update_gathering_done(agent);
++	conn_unlock(agent);
++	conn_interrupt(agent);
++	return JUICE_ERR_SUCCESS;
++}
++
+ int agent_get_local_port(juice_agent_t *agent, uint16_t *port) {
+ 	if (!agent->conn_impl)
+ 		return JUICE_ERR_NOT_AVAIL;
+diff --git a/src/agent.h b/src/agent.h
+index f214099..ae1eafc 100644
+--- a/src/agent.h
++++ b/src/agent.h
+@@ -170,6 +170,7 @@ void agent_destroy(juice_agent_t *agent);
+ int agent_gather_candidates(juice_agent_t *agent);
+ int agent_hold_gathering(juice_agent_t *agent);
+ int agent_release_gathering(juice_agent_t *agent);
++int agent_finish_gathering(juice_agent_t *agent);
+ int agent_get_local_port(juice_agent_t *agent, uint16_t *port);
+ int agent_add_local_mapped_candidate(juice_agent_t *agent, const char *address, uint16_t port);
+ int agent_probe_stun(juice_agent_t *agent, const char *host, uint16_t port,
+diff --git a/src/juice.c b/src/juice.c
+index b2d974a..8f79e67 100644
+--- a/src/juice.c
++++ b/src/juice.c
+@@ -52,6 +52,12 @@ JUICE_EXPORT int juice_release_gathering(juice_agent_t *agent) {
+ 	return agent_release_gathering(agent);
+ }
+ 
++JUICE_EXPORT int juice_finish_gathering(juice_agent_t *agent) {
++	if (!agent)
++		return JUICE_ERR_INVALID;
++	return agent_finish_gathering(agent);
++}
++
+ JUICE_EXPORT int juice_get_local_port(juice_agent_t *agent, uint16_t *port) {
+ 	if (!agent || !port)
+ 		return JUICE_ERR_INVALID;
+diff --git a/test/ffl-extensions.c b/test/ffl-extensions.c
+index 595ceaa..8399b8d 100644
+--- a/test/ffl-extensions.c
++++ b/test/ffl-extensions.c
+@@ -336,6 +336,89 @@ fail:
+     return -1;
+ }
+ 
++static volatile int swallowed_stun_requests;
++
++// Plays a STUN server that never answers, as an IPv6 STUN address does when the
++// host has an IPv6 address but no working IPv6 route.
++static int swallow_stun_requests(uintptr_t socket_handle, int socket_family,
++                                 const uint8_t *destination_address,
++                                 size_t destination_address_size, const char *data, size_t size,
++                                 int *socket_error, void *user_ptr) {
++    (void)socket_handle;
++    (void)socket_family;
++    (void)destination_address;
++    (void)destination_address_size;
++    (void)socket_error;
++    (void)user_ptr;
++    if (!is_stun_binding_request(data, size))
++        return JUICE_UDP_SEND_NOT_HANDLED;
++
++    ++swallowed_stun_requests;
++    return JUICE_UDP_SEND_HANDLED;
++}
++
++static int test_finish_gathering_with_unanswered_stun(void) {
++    gathering_done_count = 0;
++    swallowed_stun_requests = 0;
++
++    juice_config_t config;
++    memset(&config, 0, sizeof(config));
++    config.concurrency_mode = JUICE_CONCURRENCY_MODE_POLL;
++    config.bind_address = "127.0.0.1";
++    config.stun_server_host = "127.0.0.1";
++    config.stun_server_port = 3478;
++    config.cb_gathering_done = on_gathering_done;
++    config.cb_udp_send = swallow_stun_requests;
++
++    char sdp[JUICE_MAX_SDP_STRING_LEN];
++    juice_agent_t *agent = juice_create(&config);
++    if (!agent)
++        return -1;
++
++    if (juice_finish_gathering(agent) != JUICE_ERR_NOT_AVAIL)
++        goto fail;
++    if (juice_hold_gathering(agent) != JUICE_ERR_SUCCESS)
++        goto fail;
++    if (juice_gather_candidates(agent) != JUICE_ERR_SUCCESS)
++        goto fail;
++    if (juice_finish_gathering(agent) != JUICE_ERR_FAILED)
++        goto fail;
++    if (juice_release_gathering(agent) != JUICE_ERR_SUCCESS)
++        goto fail;
++    if (wait_for(&swallowed_stun_requests, 1, 1000) != 0)
++        goto fail;
++    if (gathering_done_count != 0)
++        goto fail;
++    if (juice_get_local_description(agent, sdp, sizeof(sdp)) != JUICE_ERR_SUCCESS ||
++        strstr(sdp, "a=end-of-candidates"))
++        goto fail;
++
++    if (juice_finish_gathering(agent) != JUICE_ERR_SUCCESS)
++        goto fail;
++    if (wait_for(&gathering_done_count, 1, 1000) != 0)
++        goto fail;
++    if (juice_get_local_description(agent, sdp, sizeof(sdp)) != JUICE_ERR_SUCCESS ||
++        !strstr(sdp, "a=end-of-candidates") || !strstr(sdp, " typ host"))
++        goto fail;
++
++    // The abandoned server transaction must stop retransmitting (next retry is 1 s out).
++    int swallowed_at_finish = swallowed_stun_requests;
++    sleep_ms(1500);
++    if (swallowed_stun_requests != swallowed_at_finish)
++        goto fail;
++
++    if (juice_finish_gathering(agent) != JUICE_ERR_SUCCESS || gathering_done_count != 1)
++        goto fail;
++    if (juice_hold_gathering(agent) != JUICE_ERR_FAILED)
++        goto fail;
++
++    juice_destroy(agent);
++    return 0;
++fail:
++    juice_destroy(agent);
++    return -1;
++}
++
+ int main(void) {
+     juice_set_log_level(JUICE_LOG_LEVEL_WARN);
+     const juice_concurrency_mode_t modes[] = {
+@@ -358,6 +441,11 @@ int main(void) {
+         }
+ #endif
+     }
++    printf("Running FFL finish gathering with unanswered STUN test (poll)...\n");
++    if (test_finish_gathering_with_unanswered_stun()) {
++        fprintf(stderr, "FFL finish gathering with unanswered STUN test failed\n");
++        return 1;
++    }
+     printf("Running FFL consent with full send buffer test (poll, about 40 s)...\n");
+     if (test_consent_survives_full_send_buffer()) {
+         fprintf(stderr, "FFL consent with full send buffer test failed\n");
