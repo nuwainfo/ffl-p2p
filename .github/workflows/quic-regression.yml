@@ -1,0 +1,40 @@
+name: Linux QUIC regression
+on:
+  push:
+    branches:
+      - fix/gso-capability-probe
+  pull_request:
+    paths:
+      - 'native/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/quic-regression.yml'
+permissions:
+  contents: read
+jobs:
+  quic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build native extension
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgnutls28-dev
+          python scripts/Bootstrap.py --fake-plum
+          cmake -S . -B out/regression -DCMAKE_BUILD_TYPE=Release -DFFL_P2P_FAKE_PLUM=ON
+          cmake --build out/regression --target _ffl_p2p --parallel 4
+          cp "$(find out/regression -name '_ffl_p2p*.so' -print -quit)" src/ffl_p2p/
+      - name: Reproduce legacy-kernel QUIC download
+        env:
+          PYTHONPATH: src:tests
+        run: python -m unittest -v QUICSegmentationTest
+      - name: Existing QUIC transfer scenarios
+        env:
+          PYTHONPATH: src:tests
+        run: python -m unittest -v QUICTest
