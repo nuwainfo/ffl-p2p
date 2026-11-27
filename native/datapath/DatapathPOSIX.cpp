@@ -34,6 +34,7 @@ limitations under the License.
 #include <limits>
 #include <memory>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -69,6 +70,7 @@ constexpr size_t kReceiveAddressSize = JUICE_UDP_RECV_ADDRESS_STORAGE_SIZE;
 constexpr size_t kMaxGSOSegments = 64;
 constexpr size_t kProbeSegmentSize = 1200;
 constexpr size_t kProbeSegmentCount = 2;
+constexpr int kProbeReceiveTimeoutMS = 100;
 #endif
 
 static_assert(sizeof(sockaddr_storage) <= kReceiveAddressSize,
@@ -274,6 +276,8 @@ private:
         }
 
         std::array<unsigned char, kProbeSegmentSize * kProbeSegmentCount> payload{};
+        std::fill(payload.begin() + kProbeSegmentSize, payload.end(), 0x5a);
+
         struct iovec ioVector{};
         ioVector.iov_base = payload.data();
         ioVector.iov_len = payload.size();
@@ -299,7 +303,33 @@ private:
             static_cast<uint16_t>(kProbeSegmentSize);
 
         const ssize_t result = sendmsg(sendSocket.handle(), &message, 0);
-        return result == static_cast<ssize_t>(payload.size());
+        if (result != static_cast<ssize_t>(payload.size())) {
+            return false;
+        }
+
+        // Older Linux kernels can accept UDP_SEGMENT while ignoring it.
+        // Verify what the receiving socket actually gets, not just sendmsg's
+        // byte count. A full-size buffer detects an unsplit aggregate.
+        std::array<unsigned char, kProbeSegmentSize * kProbeSegmentCount> received{};
+        for (size_t index = 0; index < kProbeSegmentCount; ++index) {
+            pollfd descriptor{};
+            descriptor.fd = receiveSocket.handle();
+            descriptor.events = POLLIN;
+            if (poll(&descriptor, 1, kProbeReceiveTimeoutMS) != 1 ||
+                (descriptor.revents & POLLIN) == 0) {
+                return false;
+            }
+
+            const ssize_t length = recv(
+                receiveSocket.handle(), received.data(), received.size(), MSG_DONTWAIT);
+            if (length != static_cast<ssize_t>(kProbeSegmentSize) ||
+                std::memcmp(received.data(), payload.data() + index * kProbeSegmentSize,
+                            kProbeSegmentSize) != 0) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     void disableSendSegmentation() {

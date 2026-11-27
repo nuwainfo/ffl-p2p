@@ -38,3 +38,11 @@ jobs:
         env:
           PYTHONPATH: src:tests
         run: python -m unittest -v QUICTest
+      - name: Source archive checksum for APE integration
+        if: github.event_name == 'push'
+        run: |
+          curl --fail --silent --show-error --location \
+            "https://github.com/${GITHUB_REPOSITORY}/archive/${GITHUB_SHA}.tar.gz" \
+            -o /tmp/ffl-p2p-source.tar.gz
+          tar -tzf /tmp/ffl-p2p-source.tar.gz | sed -n '1p'
+          sha256sum /tmp/ffl-p2p-source.tar.gz
